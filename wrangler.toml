@@ -1,0 +1,11 @@
+# Cloudflare Pages project configuration.
+# Deploy: `npm run pages:deploy` (builds, then uploads dist/ with functions/).
+# Local preview of the built app plus functions: `npm run pages:dev` (after `npm run build`).
+#
+# OSIRIS_URL is optional. Set it in the Cloudflare dashboard
+# (Pages > aegis-nexus > Settings > Environment variables), not here, so the
+# value stays out of git. Leave it unset to use the keyless built-in fallbacks.
+
+name = "aegis-nexus"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-01-01"

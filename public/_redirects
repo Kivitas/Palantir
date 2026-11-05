@@ -1,0 +1,4 @@
+# Single-page app fallback: unknown paths serve the SPA shell.
+# /osiris/* is handled by the Pages Function in functions/osiris/ (see _routes.json),
+# so it never reaches this rule.
+/* /index.html 200

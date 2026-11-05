@@ -1,0 +1,6 @@
+node_modules
+dist
+desktop_archive
+.git
+.env
+*.log

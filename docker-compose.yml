@@ -1,0 +1,24 @@
+# OPTIONAL SELF-HOST ONLY. Not used by the Cloudflare Pages deployment (see docs/CLOUDFLARE.md).
+# Runs Osiris and Aegis Nexus (nginx) on one Docker network. Requires Docker.
+name: palantir
+
+services:
+  osiris:
+    # TODO: pin a release tag or digest (e.g. ghcr.io/simplifaisoul/osiris:<tag>@sha256:...)
+    # after reviewing the release. `latest` is for evaluation only; the fork ecosystem is active.
+    image: ghcr.io/simplifaisoul/osiris:latest
+    env_file:
+      - path: .env
+        required: false
+    restart: unless-stopped
+    # Internal only: reached by the palantir container through nginx at osiris:3000.
+    expose:
+      - "3000"
+
+  palantir:
+    build: .
+    depends_on:
+      - osiris
+    restart: unless-stopped
+    ports:
+      - "8080:80"
