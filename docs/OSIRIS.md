@@ -83,7 +83,7 @@ Responses are cached for 60 seconds at the edge (`s-maxage=60`). Errors are `no-
 
 A result is saved as a short summary in `entity.properties.osint_<kind>`. Example: `MATCH: 2 hits (checked 2026-11-05)`. The raw response is not stored. Each lookup writes an `ENRICH` audit entry.
 
-**Classified data gate.** Any entity above UNCLASSIFIED is refused unless the user confirms "Send anyway" in a dialog. Declining sends nothing and is audited. The audit entry for a classified entity holds the entity ID, not its name.
+**Classified data gate.** Any entity above UNCLASSIFIED is refused unless the operator confirms "Send anyway" in a dialog. Declining sends nothing and is audited. The audit entry for a classified entity holds the entity ID, not its name. The operator is the only user, so this confirmation is a handling prompt, not an access check.
 
 **Global Ops.** The user enters an https address, which is kept in sessionStorage for the tab's session. It is shown in a sandboxed frame with `allow-scripts allow-same-origin allow-popups`. The frame is a separate origin and cannot read this app's storage. Many sites refuse to be framed, and the frame then appears blank; the tab offers an "Open in new tab" link. The CSP allows framing any `https:` origin.
 
@@ -108,7 +108,7 @@ Rules:
 - **Reliability.** Public feeds rate-limit and change. The client shows a per-layer error with retry, and the function caps upstream time and size. The EONET weather payload is large and can time out.
 - **Attribution.** OpenSanctions data is CC BY 4.0 and needs attribution wherever its results appear. The app does not show it yet.
 - **Scanning.** RECON (port and vulnerability scanning) is out of scope and not present. Keep scanning off unless an operator enables it deliberately.
-- **Image pinning.** `docker-compose.yml` uses `ghcr.io/simplifaisoul/osiris:latest` and needs a tag or digest before real use.
+- **Image pinning.** `docker-compose.yml` takes the image as `ghcr.io/simplifaisoul/osiris:${OSIRIS_IMAGE_TAG}` and has no default. Compose refuses to start until `OSIRIS_IMAGE_TAG` is set to a reviewed tag or digest. This is only the self-hosted Docker path; the Cloudflare deployment does not use it.
 
 ## Limitations
 

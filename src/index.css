@@ -3889,3 +3889,11 @@ body.theme-light .app-banner-error {
     padding: 16px;
   }
 }
+
+.settings-row-wrap {
+  flex-wrap: wrap;
+}
+
+.settings-reminder {
+  align-items: center;
+}

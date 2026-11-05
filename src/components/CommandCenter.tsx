@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { store } from '../store';
+import { store, getBackupFilename } from '../store';
 import { SeverityLevel } from '../types';
-import { Shield, Activity, BarChart2, BookOpen, Trash2, Edit3 } from 'lucide-react';
+import { Shield, Activity, BarChart2, BookOpen, Trash2, Edit3, Download } from 'lucide-react';
 import { useConfirm } from '../ui/confirmContext';
 import { useToast } from '../ui/toastContext';
+import { downloadFile, recordBackupTime } from '../utils/download';
 
 export const CommandCenter: React.FC = () => {
   const confirm = useConfirm();
@@ -15,6 +16,12 @@ export const CommandCenter: React.FC = () => {
 
   const activeCase = store.getActiveCase();
   const logs = store.data.logs.slice(0, 10); // Show recent 10 actions
+
+  const handleDownloadBackup = () => {
+    downloadFile(getBackupFilename(), store.exportWorkspace(), 'application/json');
+    recordBackupTime();
+    toast.show('Workspace backup downloaded.', 'success');
+  };
 
   // Update form state when case changes
   useEffect(() => {
@@ -134,6 +141,9 @@ export const CommandCenter: React.FC = () => {
               <div className="text-muted text-xs">Created on {new Date(activeCase.created_at).toLocaleString()}</div>
             </div>
             <div className="flex gap-sm">
+              <button className="btn btn-ghost btn-sm" onClick={handleDownloadBackup} title="Download a full workspace backup (.json)">
+                <Download size={14} /> Download backup
+              </button>
               <button className="btn btn-ghost btn-sm" onClick={() => {
                 setCaseName(activeCase.name);
                 setCaseDesc(activeCase.description);
@@ -280,7 +290,6 @@ export const CommandCenter: React.FC = () => {
                         <span className="feed-time">{new Date(log.timestamp).toLocaleTimeString()}</span>
                       </div>
                       <p className="feed-desc">{log.details}</p>
-                      <span className="feed-user">by {log.username}</span>
                     </div>
                   </div>
                 ))

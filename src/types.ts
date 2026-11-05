@@ -98,13 +98,6 @@ export interface Case {
   created_at: string;
 }
 
-export interface User {
-  username: string;
-  passwordHash: string;
-  clearance: ClearanceLevel;
-  created_at: string;
-}
-
 export interface AISettings {
   enabled: boolean;
   model: string;

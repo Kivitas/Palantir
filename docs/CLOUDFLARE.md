@@ -1,6 +1,12 @@
 # Deploying Aegis Nexus to Cloudflare Pages
 
-Aegis Nexus is deployed as a **static Vite build** (`dist/`) plus two **Pages Functions**: a same-origin gateway for `/osiris/api/*`, and a sanitising proxy for the Browser tab at `/browse`. There is no server-side storage. User data lives in the browser: the workspace in cookies, and AI keys and the Global Ops address in sessionStorage.
+Aegis Nexus is deployed as a **static Vite build** (`dist/`) plus two **Pages Functions**: a same-origin gateway for `/osiris/api/*`, and a sanitising proxy for the Browser tab at `/browse`. There is no server-side storage and no authentication. User data lives in the browser: the workspace in cookies, and AI keys and the Global Ops address in sessionStorage.
+
+What this means for the public deployment:
+
+- The site is public static. Anyone with the URL can load the app and the two Functions.
+- Each visitor gets an empty workspace in their own browser. They cannot see another visitor's data, and you cannot see theirs. Anyone with access to a browser profile can read that profile's data.
+- Do not put sensitive data in this app. Nothing is encrypted, and nothing is protected by a server.
 
 Localhost and Docker are for development and optional self-hosting only. They are not part of the Cloudflare deployment.
 
@@ -16,19 +22,15 @@ Localhost and Docker are for development and optional self-hosting only. They ar
 | Browser proxy | `functions/browse/[[path]].ts` | Fetches third-party pages for the Browser tab. See [Browser proxy](#browser-proxy-browse) |
 | Project config | `wrangler.toml` | Name `aegis-nexus`, output `dist`, compatibility date `2026-01-01` |
 
-## Option A: connect the Git repository (recommended)
+## Deploy in 3 steps (Git, recommended)
 
-1. In the Cloudflare dashboard, go to **Workers & Pages > Create > Pages > Connect to Git** and select this repository.
-2. Set the build configuration:
-   - **Framework preset:** None (or Vite)
-   - **Build command:** `npm run build`
-   - **Build output directory:** `dist`
-   - **Root directory:** (blank, the repository root)
-   - **Node.js version:** 22 or newer (set `NODE_VERSION=22` under environment variables if the default is older)
-3. Optional: add `OSIRIS_URL` under **Settings > Environment variables** for Production and, if wanted, Preview (see below).
-4. Save and deploy. Cloudflare runs `npm ci` (or `npm install`), then the build, then publishes `dist/` together with `functions/` and the `public/_*` files.
+1. **Connect the repository.** In the Cloudflare dashboard, go to **Workers & Pages > Create > Pages > Connect to Git** and select this repository. Root directory: blank (the repository root).
+2. **Set the build.** Build command `npm run build`. Build output directory `dist`. Use Node.js 22 or newer: set `NODE_VERSION=22` under environment variables if the build image's default is older. Framework preset can be None.
+3. **Optional: set `OSIRIS_URL`** under **Settings > Environment variables** (see [Environment variables](#environment-variables)). Leave it unset to use the keyless fallbacks.
 
-Every push to the production branch redeploys. Other branches get preview deployments.
+Then save and deploy. Every push to the production branch redeploys, and other branches get preview deployments.
+
+The repository's `wrangler.toml` sets the project name (`aegis-nexus`), `pages_build_output_dir = "dist"`, and the compatibility date. `public/_headers`, `public/_redirects`, and `public/_routes.json` are copied into `dist/` by the build. The functions are in `functions/` at the repository root.
 
 ## Option B: deploy from the command line with Wrangler
 
@@ -39,7 +41,9 @@ npm ci
 npm run pages:deploy      # runs `npm run build`, then `wrangler pages deploy dist`
 ```
 
-The first deploy creates the Pages project `aegis-nexus` if it does not exist.
+Run these from the repository root. `pages:deploy` is the script in `package.json`, and `wrangler.toml` names the project `aegis-nexus`.
+
+Verification status: for the 2026-11-05 docs update, `npx vitest run` passed (113 tests). The build and the deploy were not run for that update. The Git build, Functions routing, and header delivery have not been confirmed against a live deployment from this repository.
 
 ## Environment variables
 
@@ -162,13 +166,13 @@ Notes on the CSP:
 ## Data handling
 
 - No server-side database, object store, or session store is used.
-- The workspace (cases, entities, users and password hashes, settings, and the audit log) is stored in **cookies** named `aegis_ws_*`. The site has a 16,000-byte Cookie header budget, including all of its cookies.
+- The workspace (cases, entities, incidents, relationships, signals, watch rules, settings, and the audit log) is stored in **cookies** named `aegis_ws_*`. There are no accounts and no password data. The site has a 16,000-byte Cookie header budget, including all of its cookies.
 - AI API keys are in **sessionStorage** and are cleared when the tab closes. The Browser tab's first-use consent (`aegis_browser_consent`) is there too.
 - Browser tab bookmarks (up to 20, URLs and titles only) are in **cookies** (`aegis_bm`), inside the same 16,000-byte budget. An older `aegis_browser_bookmarks` copy in localStorage is moved once.
 - Cookies are sent with every request to the site, including static files, `/osiris/api/*` calls, and `/browse` calls. Neither function forwards them upstream.
 - Cookies are set `SameSite=Strict`, with `Secure` on https, and last one year. They are not `HttpOnly`, so any script running on the site can read them.
 - Data is per browser. Clearing cookies deletes the workspace. Nothing is backed up server-side.
-- Authentication is client-side only and is not a security boundary. See the README's Known limitations before using the deployment for anything sensitive.
+- There is no authentication. Access is whatever the browser profile allows, and the deployed URL is public. See the README's [Access and clearance](../README.md#access-and-clearance) and Known limitations before using the deployment for anything sensitive.
 
 ## Troubleshooting
 

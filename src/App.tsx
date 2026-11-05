@@ -1,10 +1,9 @@
 import { lazy, Suspense, useCallback, useEffect, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { store } from './store';
-import { LoginScreen } from './components/LoginScreen';
 import { DetailDrawer } from './ui/DetailDrawer';
 import { useToast } from './ui/toastContext';
 import {
-  AppWindow, BarChart3, Brain, Clock, Compass, Database, FileText, LayoutDashboard, LogOut, Map as MapIcon,
+  AppWindow, BarChart3, Brain, Clock, Compass, Database, FileText, LayoutDashboard, Map as MapIcon,
   Globe, Network, Radio, ScrollText, Search, Settings, Sun, Upload,
   type LucideIcon,
 } from 'lucide-react';
@@ -96,15 +95,13 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('command');
   const [omniOpen, setOmniOpen] = useState(false);
 
-  const loggedIn = !!store.data.current_user;
   const activeCase = store.getActiveCase();
   const theme = store.data.settings.theme;
 
-  // Ctrl/Cmd+K opens the omni search from anywhere once logged in.
+  // Ctrl/Cmd+K opens the omni search from anywhere.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
-        if (!store.data.current_user) return;
         e.preventDefault();
         setOmniOpen(open => !open);
       }
@@ -136,15 +133,6 @@ export default function App() {
     }
     setActiveTab(tab.id);
   };
-
-  if (!loggedIn) {
-    return (
-      <>
-        <StoreErrorBanner />
-        <LoginScreen onSuccess={() => setActiveTab('command')} />
-      </>
-    );
-  }
 
   const activeDef = TABS.find(t => t.id === activeTab) ?? TABS[0]!;
 
@@ -210,18 +198,6 @@ export default function App() {
               title="Toggle theme"
             >
               <Sun size={20} aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              className="btn btn-danger btn-sm"
-              onClick={() => {
-                store.logout();
-                setActiveTab('command');
-              }}
-              aria-label="Log out"
-              title="Log out"
-            >
-              <LogOut size={20} aria-hidden="true" />
             </button>
           </div>
         </div>

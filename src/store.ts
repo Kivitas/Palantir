@@ -1,5 +1,5 @@
 import {
-  User, Case, Settings, SignalStatus, ClearanceLevel, PropertyType, SeverityLevel, AuditLog,
+  Case, Settings, SignalStatus, ClearanceLevel, PropertyType, SeverityLevel, AuditLog,
   AIProvider, AISettings, Entity, Incident, Relationship, Signal, OntologyObjectType, ActionType,
   CLEARANCE_LEVELS, hasClearance, WatchRule
 } from './types';
@@ -10,7 +10,18 @@ import {
 } from './utils/cookieStorage';
 import type { CookieUsage, WriteEvent } from './utils/cookieStorage';
 
-export const SCHEMA_VERSION = 1;
+/**
+ * Schema 2: accounts were removed. Schema 1 blobs carried `users` (password hashes), `current_user`
+ * and `current_user_id`; they are ignored on load and dropped on the next write.
+ */
+export const SCHEMA_VERSION = 2;
+
+/**
+ * The app is a single-operator local workspace. Every action is audited as this name, and the
+ * operator always holds the top clearance level.
+ */
+export const OPERATOR_NAME = 'operator';
+export const OPERATOR_CLEARANCE: ClearanceLevel = 'TOP_SECRET';
 
 /** Cookie key (via cookieStorage) holding the workspace blob. */
 const WORKSPACE_KEY = 'aegis_ws';
@@ -41,14 +52,11 @@ export const MAX_RADIUS_KM = 20000;
 /** On a quota failure, audit logs are evicted down to this many before retrying once. */
 const LOG_EVICTION_FLOOR = 20;
 const PERSIST_DEBOUNCE_MS = 300;
-const MIN_PASSWORD_LENGTH = 8;
 const PROVIDERS: AIProvider[] = ['openai', 'gemini', 'anthropic', 'mistral'];
 const SEVERITIES: SeverityLevel[] = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 const CLEARANCES = Object.keys(CLEARANCE_LEVELS) as ClearanceLevel[];
 
 export interface StoreResult { success: boolean; msg: string }
-/** An account as shown in the UI. Never carries the password hash. */
-export interface UserSummary { username: string; clearance: ClearanceLevel; created_at: string }
 export interface BulkAddResult { added: number; error?: string }
 /** Input for addSignal. Text is truncated to fit the storage budget. */
 export interface SignalInput {
@@ -63,9 +71,6 @@ export interface SignalInput {
 export type WatchRuleInput = Omit<WatchRule, 'id' | 'enabled'> & { enabled?: boolean };
 
 export interface WorkspaceState {
-  users: Record<string, User>;
-  current_user: string | null;
-  current_user_id: string | null;
   cases: Case[];
   active_case_id: string | null;
   settings: Settings;
@@ -75,20 +80,6 @@ export interface WorkspaceState {
 }
 
 type Rec = Record<string, unknown>;
-
-/**
- * DEMO-GRADE HASH. A 32-bit string hash is NOT a password hash: it is fast, unsalted
- * and trivially brute-forced. It only keeps plain passwords out of the stored blob.
- * Real authentication needs a server.
- */
-export const mockHash = (str: string): string => {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    hash = (hash << 5) - hash + str.charCodeAt(i);
-    hash |= 0;
-  }
-  return hash.toString(16);
-};
 
 const newId = (): string => {
   // crypto.randomUUID exists only in secure contexts (https / localhost). Over a plain-http
@@ -108,22 +99,10 @@ const asClearance = (v: unknown): ClearanceLevel =>
 /**
  * Clearance for imported entities, incidents and relationships. Missing or invalid values fail
  * CLOSED to TOP_SECRET, so an item with unknown sensitivity is never exported to a lower-cleared
- * viewer. (Users still default to UNCLASSIFIED via asClearance; that only concerns their own level.)
+ * viewer.
  */
 const asItemClearance = (v: unknown): ClearanceLevel =>
   typeof v === 'string' && (CLEARANCES as string[]).includes(v) ? (v as ClearanceLevel) : 'TOP_SECRET';
-/**
- * Names that must never become user keys. Plain-object lookups would otherwise hit inherited
- * members (e.g. "__proto__" rewires the prototype instead of creating an account).
- */
-const RESERVED_USERNAMES: ReadonlySet<string> = new Set([
-  '__proto__', 'constructor', 'prototype', 'hasOwnProperty', 'isPrototypeOf', 'propertyIsEnumerable',
-  'toString', 'toLocaleString', 'valueOf', '__defineGetter__', '__defineSetter__', '__lookupGetter__',
-  '__lookupSetter__',
-]);
-const isReservedUsername = (name: string): boolean => RESERVED_USERNAMES.has(name);
-/** User map with no prototype, so no inherited key can ever resolve as a user. */
-const newUserMap = (): Record<string, User> => Object.create(null) as Record<string, User>;
 const asSeverity = (v: unknown): SeverityLevel =>
   typeof v === 'string' && (SEVERITIES as string[]).includes(v) ? (v as SeverityLevel) : 'LOW';
 
@@ -238,6 +217,34 @@ function normalizeCase(raw: Rec, forceId?: string): Case {
 
 const defaultAI = (model: string): AISettings => ({ enabled: false, model, key_stored: false });
 
+/** Cells starting with one of these are read as formulas by spreadsheets (CSV injection). */
+const FORMULA_START = /^[=+\-@\t\r]/;
+/** A plain number such as -33.86, 151.2 or 1e3. Spreadsheets read it as a value, never as a formula. */
+const NUMERIC_CELL = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i;
+
+/**
+ * One RFC 4180 cell. Formula-looking text gets a leading single quote so it stays text (purely
+ * numeric cells such as negative coordinates are exempt), then the cell is quoted when it holds a
+ * comma, a double quote or a line break.
+ */
+function csvCell(value: unknown): string {
+  let text = value === null || value === undefined ? '' : String(value);
+  if (FORMULA_START.test(text) && !NUMERIC_CELL.test(text)) text = `'${text}`;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+/** CSV with a header row and CRLF line endings (RFC 4180). */
+function csvText(headers: string[], rows: unknown[][]): string {
+  return [headers, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
+}
+
+/** Download name for a workspace backup in local time, e.g. aegis-nexus-backup-20261105-0907.json. */
+export function getBackupFilename(now: Date = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  const day = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}`;
+  return `aegis-nexus-backup-${day}-${p(now.getHours())}${p(now.getMinutes())}.json`;
+}
+
 /** Resolves when init() has finished. Create-once at module load; main.tsx can await it via initStore(). */
 let resolveStoreReady: () => void = () => {};
 export const storeReady: Promise<void> = new Promise<void>((resolve) => {
@@ -260,9 +267,6 @@ class Store {
   public lastError: string | null = null;
 
   public data: WorkspaceState = {
-    users: newUserMap(),
-    current_user: null,
-    current_user_id: null,
     cases: [],
     active_case_id: null,
     settings: {
@@ -306,7 +310,7 @@ class Store {
       }
       migrateLegacyAIKeys();
 
-      const { fromLegacy, legacyKeysFound } = this.loadWorkspace();
+      const { fromLegacy, needsRewrite } = this.loadWorkspace();
       this.loadedFromLegacy = fromLegacy;
       this.loadAIKeys();
       this.syncKeyFlags();
@@ -317,10 +321,7 @@ class Store {
       onWriteResult((event) => this.onCookieWrite(event));
 
       this.ready = true;
-      if (Object.keys(this.data.users).length === 0) {
-        this.createUser('admin', 'admin', 'TOP_SECRET');
-      }
-      if (fromLegacy || legacyKeysFound) {
+      if (fromLegacy || needsRewrite) {
         this.persistKeys();
         this.schedulePersist();
       }
@@ -332,15 +333,18 @@ class Store {
     this.notify();
   }
 
-  /** Tolerant loader: reads the blob from cookies (or a legacy copy). Returns what it found. */
-  private loadWorkspace(): { fromLegacy: boolean; legacyKeysFound: boolean } {
+  /**
+   * Tolerant loader: reads the blob from cookies (or a legacy copy). `needsRewrite` is set when the
+   * stored blob is from an older schema, so it is saved again in the current shape at once.
+   */
+  private loadWorkspace(): { fromLegacy: boolean; needsRewrite: boolean } {
     let raw = getItemSync(WORKSPACE_KEY);
     let fromLegacy = false;
     if (raw === null) {
       raw = getItemSync(LEGACY_WS_KEY) ?? legacyLocalGet(LEGACY_WS_KEY);
       fromLegacy = raw !== null;
     }
-    let legacyKeysFound = false;
+    let needsRewrite = false;
     if (raw !== null) {
       let parsed: unknown = null;
       try {
@@ -352,40 +356,31 @@ class Store {
       }
       if (isRecord(parsed)) {
         try {
-          legacyKeysFound = this.applyPersisted(parsed);
+          needsRewrite = this.applyPersisted(parsed) || needsRewrite;
         } catch (e) {
           console.error('Failed to apply workspace data:', e);
         }
       }
     }
-    return { fromLegacy, legacyKeysFound };
+    return { fromLegacy, needsRewrite };
   }
 
-  /** Tolerant loader: unknown or malformed fields fall back to defaults. Returns true if legacy keys were seen. */
+  /**
+   * Tolerant loader: unknown or malformed fields fall back to defaults. Returns true if the blob
+   * should be saved again (older schema, old account data, or AI keys stored in the blob).
+   */
   private applyPersisted(p: Rec): boolean {
     const d = this.data;
-    let legacy = false;
+    let rewrite = typeof p.schema_version !== 'number' || p.schema_version < SCHEMA_VERSION;
     if (typeof p.schema_version === 'number' && p.schema_version > SCHEMA_VERSION) {
       console.warn(`Workspace schema v${p.schema_version} is newer than v${SCHEMA_VERSION}; loading best-effort.`);
     }
-
-    d.users = newUserMap();
-    if (isRecord(p.users)) {
-      for (const [name, u] of Object.entries(p.users)) {
-        if (isReservedUsername(name)) continue;
-        if (isRecord(u) && typeof u.passwordHash === 'string') {
-          d.users[name] = {
-            username: name,
-            passwordHash: u.passwordHash,
-            clearance: asClearance(u.clearance),
-            created_at: str(u.created_at, new Date().toISOString()),
-          };
-        }
-      }
+    // Schema 1 account data (users, password hashes, current_user) is deliberately not read.
+    // Its presence means the blob still needs rewriting, which drops those fields.
+    if (Object.hasOwn(p, 'users') || Object.hasOwn(p, 'current_user') || Object.hasOwn(p, 'current_user_id')) {
+      rewrite = true;
     }
 
-    d.current_user = typeof p.current_user === 'string' ? p.current_user : null;
-    d.current_user_id = typeof p.current_user_id === 'string' ? p.current_user_id : null;
     d.cases = arr<unknown>(p.cases).filter(isRecord).map((c) => normalizeCase(c));
     d.active_case_id = typeof p.active_case_id === 'string' ? p.active_case_id : null;
     d.active_path = arr<unknown>(p.active_path).filter((x): x is string => typeof x === 'string');
@@ -417,12 +412,12 @@ class Store {
           if (typeof raw.apiKey === 'string' && raw.apiKey) {
             cur.apiKey = raw.apiKey;
             cur.key_stored = true;
-            legacy = true;
+            rewrite = true;
           }
         }
       }
     }
-    return legacy;
+    return rewrite;
   }
 
   private loadAIKeys() {
@@ -559,9 +554,6 @@ class Store {
     }
     return JSON.stringify({
       schema_version: SCHEMA_VERSION,
-      users: d.users,
-      current_user: d.current_user,
-      current_user_id: d.current_user_id,
       cases: d.cases,
       active_case_id: d.active_case_id,
       settings: { theme: d.settings.theme, ai },
@@ -627,7 +619,10 @@ class Store {
     return { success: true, msg: 'All local data erased.' };
   }
 
-  /** Whole workspace as a JSON backup. Includes users (password hashes) and cases; excludes AI keys. */
+  /**
+   * Whole workspace as a JSON backup: cases, audit trail and settings. Never contains password
+   * hashes (there are no accounts) and never contains AI keys.
+   */
   public exportWorkspace(): string {
     const file = {
       format: WORKSPACE_BACKUP_FORMAT,
@@ -650,21 +645,15 @@ class Store {
       return fail('File is not valid JSON.');
     }
     const body = isRecord(parsed) && parsed.format === WORKSPACE_BACKUP_FORMAT ? parsed.workspace : parsed;
-    if (!isRecord(body) || !isRecord(body.users) || !Array.isArray(body.cases)) {
+    if (!isRecord(body) || !Array.isArray(body.cases)) {
       return fail('File does not contain a workspace backup.');
     }
-    // The current session and audit trail are not taken from the file: a backup must not log
-    // anyone in (or out) implicitly, and the existing history is kept as the record of this import.
-    const session = this.data.current_user;
-    const sessionId = this.data.current_user_id;
+    // The existing audit trail is kept as the record of this import. Backups from schema 1 also
+    // carry `users` with password hashes; applyPersisted does not read them, so they are dropped.
     const existingLogs = this.data.logs;
 
     // applyPersisted never clears apiKey, so keys held in this session survive the import.
     this.applyPersisted(body);
-    const keptUser = session !== null && Object.hasOwn(this.data.users, session);
-    this.data.current_user = keptUser ? session : null;
-    this.data.current_user_id = keptUser ? sessionId : null;
-    if (!keptUser) this.data.active_case_id = null;
 
     const seen = new Set<string>();
     const merged: AuditLog[] = [];
@@ -678,7 +667,7 @@ class Store {
 
     this.syncKeyFlags();
     this.persistKeys();
-    this.logAction('WORKSPACE_IMPORT', `Imported workspace backup (${this.data.cases.length} cases, ${Object.keys(this.data.users).length} users)`);
+    this.logAction('WORKSPACE_IMPORT', `Imported workspace backup (${this.data.cases.length} cases)`);
     return { success: true, msg: `Imported ${this.data.cases.length} cases.` };
   }
 
@@ -688,7 +677,7 @@ class Store {
     const entry: AuditLog = {
       id: newId(),
       timestamp: new Date().toISOString(),
-      username: this.data.current_user || 'SYSTEM',
+      username: OPERATOR_NAME,
       action,
       details
     };
@@ -697,150 +686,14 @@ class Store {
     this.changed();
   }
 
-  // ---- Auth & clearance ---------------------------------------------------
-
-  private getUser(name: string): User | undefined {
-    if (isReservedUsername(name)) return undefined;
-    return Object.hasOwn(this.data.users, name) ? this.data.users[name] : undefined;
-  }
-
-  private createUser(username: string, pass: string, clearance: ClearanceLevel) {
-    this.data.users[username] = {
-      username,
-      passwordHash: mockHash(pass),
-      clearance,
-      created_at: new Date().toISOString()
-    };
-    this.logAction('USER_SIGNUP', `Created user: ${username} (${clearance})`);
-  }
-
-  /** Self-service signup. Always creates UNCLASSIFIED; only a TOP_SECRET user can raise it. */
-  public signup(username: string, pass: string): StoreResult {
-    const name = username.trim();
-    if (!/^[\w.-]{1,64}$/.test(name)) {
-      return fail('Username must be 1-64 letters, numbers, dots, dashes or underscores.');
-    }
-    if (isReservedUsername(name)) return fail('That username is reserved. Choose another.');
-    if (pass.length < MIN_PASSWORD_LENGTH) {
-      return fail(`Password must be at least ${MIN_PASSWORD_LENGTH} characters long.`);
-    }
-    if (this.getUser(name)) return fail('Username already exists');
-    this.createUser(name, pass, 'UNCLASSIFIED');
-    return { success: true, msg: '' };
-  }
-
-  /** Takes the raw password. It is hashed exactly once, here. */
-  public login(username: string, pass: string): StoreResult {
-    const name = username.trim();
-    const u = this.getUser(name);
-    const hash = mockHash(pass);
-    if (u) {
-      if (u.passwordHash === hash) return this.startSession(name);
-      // Migration: builds before this fix stored mockHash(mockHash(pass)) for users
-      // created from the login form. Accept it once and upgrade the stored hash.
-      if (u.passwordHash === mockHash(hash)) {
-        u.passwordHash = hash;
-        return this.startSession(name);
-      }
-    }
-    return fail('Invalid credentials');
-  }
-
-  private startSession(name: string): StoreResult {
-    this.data.current_user = name;
-    this.data.current_user_id = name;
-    this.logAction('LOGIN', `User logged in: ${name}`);
-    return { success: true, msg: '' };
-  }
-
-  public logout() {
-    this.logAction('LOGOUT', `User logged out: ${this.data.current_user}`);
-    this.data.current_user = null;
-    this.data.current_user_id = null;
-    this.data.active_case_id = null;
-    this.changed();
-  }
-
-  public getCurrentUserClearance(): ClearanceLevel {
-    if (!this.data.current_user) return 'UNCLASSIFIED';
-    return this.getUser(this.data.current_user)?.clearance ?? 'UNCLASSIFIED';
-  }
-
-  /** Only a TOP_SECRET user can change clearances. Every change is audited. */
-  public setUserClearance(targetUsername: string, level: ClearanceLevel): StoreResult {
-    const actorName = this.data.current_user;
-    const actor = actorName ? this.getUser(actorName) : undefined;
-    if (!actor || actor.clearance !== 'TOP_SECRET') {
-      return fail('Only TOP_SECRET users can change clearance levels.');
-    }
-    if (!(Object.hasOwn(CLEARANCE_LEVELS, level))) return fail('Unknown clearance level.');
-    const target = this.getUser(targetUsername);
-    if (!target) return fail('User not found.');
-
-    if (target.clearance === 'TOP_SECRET' && level !== 'TOP_SECRET') {
-      const topSecretCount = Object.values(this.data.users).filter(u => u.clearance === 'TOP_SECRET').length;
-      if (topSecretCount <= 1) return fail('Cannot demote the last TOP_SECRET user.');
-    }
-
-    const previous = target.clearance;
-    target.clearance = level;
-    this.logAction('CLEARANCE_CHANGE', `${actor.username} set ${target.username} clearance ${previous} -> ${level}`);
-    return { success: true, msg: '' };
-  }
-
-  /** Only a TOP_SECRET user can delete accounts. Nobody deletes themselves or the last TOP_SECRET user. */
-  public deleteUser(targetUsername: string): StoreResult {
-    const actorName = this.data.current_user;
-    const actor = actorName ? this.getUser(actorName) : undefined;
-    if (!actor || actor.clearance !== 'TOP_SECRET') {
-      return fail('Only TOP_SECRET users can delete accounts.');
-    }
-    const target = this.getUser(targetUsername);
-    if (!target) return fail('User not found.');
-    if (target.username === actor.username) return fail('You cannot delete your own account.');
-    if (target.clearance === 'TOP_SECRET') {
-      const topSecretCount = Object.values(this.data.users).filter(u => u.clearance === 'TOP_SECRET').length;
-      if (topSecretCount <= 1) return fail('Cannot delete the last TOP_SECRET user.');
-    }
-    delete this.data.users[target.username];
-    this.logAction('USER_DELETE', `${actor.username} deleted user ${target.username} (${target.clearance})`);
-    return { success: true, msg: '' };
-  }
-
-  /** Accounts for display. Password hashes are never included. */
-  public listUsers(): UserSummary[] {
-    return Object.values(this.data.users).map((u) => ({
-      username: u.username,
-      clearance: u.clearance,
-      created_at: u.created_at,
-    }));
-  }
-
-  /** True while the built-in admin account still has its default password, "admin". */
-  public isDefaultAdminPassword(): boolean {
-    const admin = this.getUser('admin');
-    return admin !== undefined && admin.passwordHash === mockHash('admin');
-  }
+  // ---- Operator clearance ---------------------------------------------------
 
   /**
-   * Changes the signed-in user's password. The current password must match, the new one must be at
-   * least MIN_PASSWORD_LENGTH characters, and the admin account cannot use "admin" (case-insensitive).
-   * The password itself is never written to the audit log.
+   * The operator always holds TOP_SECRET. Clearance markings on objects still decide what is
+   * exported, what the AI sends out and what is shown in path finding.
    */
-  public changePassword(oldPass: string, newPass: string): StoreResult {
-    const name = this.data.current_user;
-    const user = name ? this.getUser(name) : undefined;
-    if (!user) return fail('Sign in to change your password.');
-    if (user.passwordHash !== mockHash(oldPass)) return fail('Current password is incorrect.');
-    if (newPass.length < MIN_PASSWORD_LENGTH) {
-      return fail(`Password must be at least ${MIN_PASSWORD_LENGTH} characters long.`);
-    }
-    if (user.username === 'admin' && newPass.trim().toLowerCase() === 'admin') {
-      return fail('The admin account cannot use "admin" as its password.');
-    }
-    user.passwordHash = mockHash(newPass);
-    this.logAction('PASSWORD_CHANGE', `Changed password for ${user.username}`);
-    return { success: true, msg: '' };
+  public getCurrentUserClearance(): ClearanceLevel {
+    return OPERATOR_CLEARANCE;
   }
 
   // ---- Settings -----------------------------------------------------------
@@ -954,6 +807,31 @@ class Store {
     };
     this.logAction('CASE_EXPORT', `Exported case: ${c.name}`);
     return JSON.stringify(payload, null, 2);
+  }
+
+  /**
+   * The case's entities and incidents as two CSV tables, limited to what the viewer may see.
+   * Both are empty strings if the case does not exist.
+   */
+  public exportCasesCsv(caseId: string): { entities: string; incidents: string } {
+    const c = this.findCase(caseId);
+    if (!c) return { entities: '', incidents: '' };
+    const viewer = this.getCurrentUserClearance();
+    const visible = (x: { clearance: ClearanceLevel }) => hasClearance(viewer, x.clearance);
+    const entityRows = c.entities
+      .filter(visible)
+      .map((e) => [e.id, e.type, e.name, e.clearance, e.created_at, JSON.stringify(e.properties)]);
+    const incidentRows = c.incidents
+      .filter(visible)
+      .map((i) => [i.id, i.title, i.description, i.lat, i.lon, i.date, i.clock, i.severity, i.clearance, i.created_at]);
+    this.logAction('CASE_EXPORT', `Exported CSV of case: ${c.name}`);
+    return {
+      entities: csvText(['id', 'type', 'name', 'clearance', 'created_at', 'properties'], entityRows),
+      incidents: csvText(
+        ['id', 'title', 'description', 'lat', 'lon', 'date', 'clock', 'severity', 'clearance', 'created_at'],
+        incidentRows,
+      ),
+    };
   }
 
   /** Import a case JSON produced by exportCase. Always assigns a fresh id to avoid collisions. */

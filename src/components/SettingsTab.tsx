@@ -1,8 +1,8 @@
 import React, { useEffect, useReducer, useState } from 'react';
-import { Database, Download, KeyRound, ShieldAlert, Trash2, Upload, Users } from 'lucide-react';
-import { store } from '../store';
-import { CLEARANCE_LEVELS, type ClearanceLevel } from '../types';
+import { Clock, Database, Download, ShieldAlert, Trash2, Upload } from 'lucide-react';
+import { store, getBackupFilename } from '../store';
 import { onWriteResult } from '../utils/cookieStorage';
+import { downloadFile, lastBackupTime, recordBackupTime } from '../utils/download';
 import { useToast } from '../ui/toastContext';
 import { useConfirm } from '../ui/confirmContext';
 
@@ -10,12 +10,9 @@ import { useConfirm } from '../ui/confirmContext';
 const STORAGE_WARN_RATIO = 0.8;
 /** Typed into the danger zone before the erase button arms. */
 const ERASE_PHRASE = 'ERASE';
-/** Mirrors the store's minimum password length (the store enforces it; this is for the hint). */
-const MIN_PASSWORD_LENGTH = 8;
-const CLEARANCES = Object.keys(CLEARANCE_LEVELS) as ClearanceLevel[];
 
-/** Re-renders when the store changes or a cookie write finishes (usage figures change then). */
-function useRefreshOnChange(): void {
+/** Re-renders when the store changes or a cookie write finishes. Returns a function to force a re-render. */
+function useRefreshOnChange(): () => void {
   const [, refresh] = useReducer((n: number) => n + 1, 0);
   useEffect(() => {
     const offStore = store.subscribe(() => refresh());
@@ -25,6 +22,7 @@ function useRefreshOnChange(): void {
       offCookies();
     };
   }, []);
+  return refresh;
 }
 
 function formatKB(bytes: number): string {
@@ -39,17 +37,6 @@ function fileSafe(name: string): string {
   return name.replace(/[^A-Za-z0-9_.-]+/g, '_').slice(0, 60) || 'case';
 }
 
-function downloadText(filename: string, text: string): void {
-  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
-}
-
 async function readText(file: File): Promise<string | null> {
   try {
     return await file.text();
@@ -58,17 +45,174 @@ async function readText(file: File): Promise<string | null> {
   }
 }
 
-const DefaultPasswordBanner: React.FC = () => {
-  useRefreshOnChange();
-  if (store.data.current_user !== 'admin' || !store.isDefaultAdminPassword()) return null;
+const YourDataSection: React.FC = () => {
+  const refresh = useRefreshOnChange();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const cases = store.data.cases;
+  const [pickedCaseId, setPickedCaseId] = useState('');
+  const selectedId = cases.some((c) => c.id === pickedCaseId) ? pickedCaseId : (cases[0]?.id ?? '');
+  const selectedName = store.getCase(selectedId)?.name ?? 'case';
+  const { bytesUsed } = store.getStorageUsage();
+  const lastBackup = lastBackupTime();
+  const showReminder = lastBackup === null && bytesUsed > 0;
+
+  const handleDownloadBackup = () => {
+    downloadFile(getBackupFilename(), store.exportWorkspace(), 'application/json');
+    recordBackupTime();
+    refresh();
+    toast.show('Workspace backup downloaded.', 'success');
+  };
+
+  const handleRestore = async (file: File) => {
+    const text = await readText(file);
+    if (text === null) {
+      toast.show('Could not read that file.', 'error');
+      return;
+    }
+    const ok = await confirm({
+      title: 'Replace the whole workspace?',
+      message:
+        'Restoring replaces every case and the audit trail with the contents of this backup. ' +
+        'Download a backup of your current data first if you need it. Continue?',
+      confirmLabel: 'Replace workspace',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    const result = store.importWorkspace(text);
+    toast.show(result.msg, result.success ? 'success' : 'error');
+  };
+
+  const handleDownloadCase = () => {
+    const json = store.exportCase(selectedId);
+    if (!json) {
+      toast.show('Select a case to download.', 'error');
+      return;
+    }
+    downloadFile(`case-${fileSafe(selectedName)}-${today()}.json`, json, 'application/json');
+    toast.show(`Downloaded case "${selectedName}".`, 'success');
+  };
+
+  const handleDownloadCsv = (table: 'entities' | 'incidents') => {
+    const csv = store.exportCasesCsv(selectedId);
+    const text = csv[table];
+    if (!text) {
+      toast.show('Select a case to download.', 'error');
+      return;
+    }
+    downloadFile(`${fileSafe(selectedName)}-${table}-${today()}.csv`, text, 'text/csv');
+    toast.show(`Downloaded ${table} CSV for "${selectedName}".`, 'success');
+  };
+
+  const handleImportCase = async (file: File) => {
+    const text = await readText(file);
+    if (text === null) {
+      toast.show('Could not read that file.', 'error');
+      return;
+    }
+    const result = store.importCase(text);
+    toast.show(result.msg, result.success ? 'success' : 'error');
+  };
+
+  const noCases = cases.length === 0;
+
   return (
-    <div role="alert" className="alert alert-danger settings-banner">
-      <ShieldAlert size={18} aria-hidden="true" />
-      <div>
-        <strong>The admin account still uses the default password.</strong>
-        <span>Anyone who knows the default can sign in as admin. Change it in the Account section below.</span>
+    <section className="premium-panel settings-section" aria-labelledby="settings-data-title">
+      <h2 id="settings-data-title" className="premium-panel-title">
+        <Database size={14} aria-hidden="true" /> Your data
+      </h2>
+      <p>
+        All of your data lives in this browser&apos;s cookies on this site. None of it is stored on a server. If the
+        cookies are cleared or erased, the data is lost, so download backups and keep them somewhere safe.
+      </p>
+
+      {showReminder && (
+        <div role="status" className="alert alert-info settings-reminder">
+          <Download size={16} aria-hidden="true" />
+          <span>You have not downloaded a backup yet. Download a full backup now.</span>
+        </div>
+      )}
+
+      <p className="settings-muted" data-testid="last-backup">
+        <Clock size={12} aria-hidden="true" />{' '}
+        {lastBackup
+          ? `Last backup downloaded ${lastBackup.toLocaleString()}.`
+          : 'No backup downloaded in this tab yet.'}
+      </p>
+
+      <div className="settings-row settings-row-wrap">
+        <button type="button" className="premium-button" onClick={handleDownloadBackup}>
+          <Download size={14} aria-hidden="true" /> Download full backup (.json)
+        </button>
       </div>
-    </div>
+      <p className="settings-muted">
+        A full backup holds every case, the audit trail and your settings. AI API keys are never included. Keep it private.
+      </p>
+
+      <div className="settings-field">
+        <label htmlFor="settings-restore-file">Restore from backup</label>
+        <input
+          id="settings-restore-file"
+          type="file"
+          accept=".json,application/json"
+          className="settings-file"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            e.target.value = '';
+            if (file) void handleRestore(file);
+          }}
+        />
+        <p className="settings-muted">Restoring replaces the whole workspace.</p>
+      </div>
+
+      <div className="settings-field">
+        <label htmlFor="settings-case-select">Download one case</label>
+        <select
+          id="settings-case-select"
+          className="premium-input"
+          value={selectedId}
+          disabled={noCases}
+          onChange={(e) => setPickedCaseId(e.target.value)}
+        >
+          {noCases && <option value="">No cases yet</option>}
+          {cases.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+        <div className="settings-row settings-row-wrap">
+          <button type="button" className="premium-button" onClick={handleDownloadCase} disabled={noCases}>
+            <Download size={14} aria-hidden="true" /> Download case (.json)
+          </button>
+          <button type="button" className="premium-button" onClick={() => handleDownloadCsv('entities')} disabled={noCases}>
+            <Download size={14} aria-hidden="true" /> Download entities CSV
+          </button>
+          <button type="button" className="premium-button" onClick={() => handleDownloadCsv('incidents')} disabled={noCases}>
+            <Download size={14} aria-hidden="true" /> Download incidents CSV
+          </button>
+        </div>
+        <p className="settings-muted">Downloads include everything in the case, including classified-labelled items. CSV files open in Excel.</p>
+      </div>
+
+      <div className="settings-field">
+        <label htmlFor="settings-case-import">Import a case file</label>
+        <input
+          id="settings-case-import"
+          type="file"
+          accept=".json,application/json"
+          className="settings-file"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            e.target.value = '';
+            if (file) void handleImportCase(file);
+          }}
+        />
+        <p className="settings-muted">
+          <Upload size={12} aria-hidden="true" /> Imported cases are added as new cases with fresh IDs.
+        </p>
+      </div>
+    </section>
   );
 };
 
@@ -101,321 +245,8 @@ const StorageSection: React.FC = () => {
         <div role="alert" className="alert alert-warning">
           <ShieldAlert size={16} aria-hidden="true" />
           <span>
-            Storage is more than 80% full. Export a backup, then delete old cases or audit entries before adding more data.
+            Storage is more than 80% full. Download a backup, then delete old cases or audit entries before adding more data.
           </span>
-        </div>
-      )}
-    </section>
-  );
-};
-
-const BackupSection: React.FC = () => {
-  useRefreshOnChange();
-  const toast = useToast();
-  const confirm = useConfirm();
-  const cases = store.data.cases;
-  const [pickedCaseId, setPickedCaseId] = useState('');
-  const selectedId = cases.some((c) => c.id === pickedCaseId) ? pickedCaseId : (cases[0]?.id ?? '');
-
-  const handleDownloadBackup = () => {
-    downloadText(`palantir-workspace-${today()}.json`, store.exportWorkspace());
-    toast.show('Workspace backup downloaded.', 'success');
-  };
-
-  const handleRestore = async (file: File) => {
-    const text = await readText(file);
-    if (text === null) {
-      toast.show('Could not read that file.', 'error');
-      return;
-    }
-    const ok = await confirm({
-      title: 'Replace the whole workspace?',
-      message:
-        'Restoring replaces every case, the audit trail and ALL user accounts, including their password hashes, ' +
-        'with the contents of this backup. Export your current data first if you need it. Continue?',
-      confirmLabel: 'Replace workspace',
-      tone: 'danger',
-    });
-    if (!ok) return;
-    const result = store.importWorkspace(text);
-    toast.show(result.msg, result.success ? 'success' : 'error');
-  };
-
-  const handleExportCase = () => {
-    const json = store.exportCase(selectedId);
-    if (!json) {
-      toast.show('Select a case to export.', 'error');
-      return;
-    }
-    const name = store.getCase(selectedId)?.name ?? 'case';
-    downloadText(`case-${fileSafe(name)}-${today()}.json`, json);
-    toast.show(`Exported case "${name}".`, 'success');
-  };
-
-  const handleImportCase = async (file: File) => {
-    const text = await readText(file);
-    if (text === null) {
-      toast.show('Could not read that file.', 'error');
-      return;
-    }
-    const result = store.importCase(text);
-    toast.show(result.msg, result.success ? 'success' : 'error');
-  };
-
-  return (
-    <section className="premium-panel settings-section" aria-labelledby="settings-backup-title">
-      <h2 id="settings-backup-title" className="premium-panel-title">
-        <Download size={14} aria-hidden="true" /> Backup and restore
-      </h2>
-
-      <div className="settings-row">
-        <button type="button" className="premium-button" onClick={handleDownloadBackup}>
-          <Download size={14} aria-hidden="true" /> Download workspace backup
-        </button>
-      </div>
-      <p className="settings-muted">
-        A workspace backup holds every case, the audit trail and all user accounts with their password hashes. Keep it private.
-        AI API keys are never included.
-      </p>
-
-      <div className="settings-field">
-        <label htmlFor="settings-restore-file">Restore from backup</label>
-        <input
-          id="settings-restore-file"
-          type="file"
-          accept=".json,application/json"
-          className="settings-file"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            e.target.value = '';
-            if (file) void handleRestore(file);
-          }}
-        />
-        <p className="settings-muted">Restoring replaces the whole workspace, including users and password hashes.</p>
-      </div>
-
-      <div className="settings-field">
-        <label htmlFor="settings-case-select">Export a single case</label>
-        <div className="settings-row">
-          <select
-            id="settings-case-select"
-            className="premium-input"
-            value={selectedId}
-            disabled={cases.length === 0}
-            onChange={(e) => setPickedCaseId(e.target.value)}
-          >
-            {cases.length === 0 && <option value="">No cases yet</option>}
-            {cases.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-          <button type="button" className="premium-button" onClick={handleExportCase} disabled={cases.length === 0}>
-            <Download size={14} aria-hidden="true" /> Export case
-          </button>
-        </div>
-        <p className="settings-muted">An export only includes items your clearance allows you to see.</p>
-      </div>
-
-      <div className="settings-field">
-        <label htmlFor="settings-case-import">Import a case file</label>
-        <input
-          id="settings-case-import"
-          type="file"
-          accept=".json,application/json"
-          className="settings-file"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            e.target.value = '';
-            if (file) void handleImportCase(file);
-          }}
-        />
-        <p className="settings-muted">
-          <Upload size={12} aria-hidden="true" /> Imported cases are added as new cases with fresh IDs.
-        </p>
-      </div>
-    </section>
-  );
-};
-
-const AccountSection: React.FC = () => {
-  useRefreshOnChange();
-  const toast = useToast();
-  const signedIn = store.data.current_user !== null;
-  const [oldPass, setOldPass] = useState('');
-  const [newPass, setNewPass] = useState('');
-  const [confirmPass, setConfirmPass] = useState('');
-  const [error, setError] = useState<string | null>(null);
-
-  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (newPass !== confirmPass) {
-      setError('The new passwords do not match.');
-      return;
-    }
-    const result = store.changePassword(oldPass, newPass);
-    if (!result.success) {
-      setError(result.msg);
-      toast.show(result.msg, 'error');
-      return;
-    }
-    setError(null);
-    setOldPass('');
-    setNewPass('');
-    setConfirmPass('');
-    toast.show('Password changed.', 'success');
-  };
-
-  return (
-    <section className="premium-panel settings-section" aria-labelledby="settings-account-title">
-      <h2 id="settings-account-title" className="premium-panel-title">
-        <KeyRound size={14} aria-hidden="true" /> Account
-      </h2>
-      {!signedIn ? (
-        <p className="settings-muted">Sign in to change your password.</p>
-      ) : (
-        <form className="settings-form" onSubmit={handleSubmit} aria-label="Change password">
-          <div className="settings-field">
-            <label htmlFor="settings-old-password">Current password</label>
-            <input
-              id="settings-old-password"
-              type="password"
-              className="premium-input"
-              autoComplete="current-password"
-              required
-              value={oldPass}
-              onChange={(e) => setOldPass(e.target.value)}
-            />
-          </div>
-          <div className="settings-field">
-            <label htmlFor="settings-new-password">New password</label>
-            <input
-              id="settings-new-password"
-              type="password"
-              className="premium-input"
-              autoComplete="new-password"
-              required
-              minLength={MIN_PASSWORD_LENGTH}
-              aria-describedby="settings-new-password-hint"
-              aria-invalid={error ? true : undefined}
-              value={newPass}
-              onChange={(e) => setNewPass(e.target.value)}
-            />
-            <span id="settings-new-password-hint" className="settings-muted">
-              At least {MIN_PASSWORD_LENGTH} characters.
-            </span>
-          </div>
-          <div className="settings-field">
-            <label htmlFor="settings-confirm-password">Confirm new password</label>
-            <input
-              id="settings-confirm-password"
-              type="password"
-              className="premium-input"
-              autoComplete="new-password"
-              required
-              value={confirmPass}
-              onChange={(e) => setConfirmPass(e.target.value)}
-            />
-          </div>
-          <div className="settings-row">
-            <button type="submit" className="premium-button primary">
-              Change password
-            </button>
-          </div>
-          {error && (
-            <p role="alert" className="settings-error">
-              {error}
-            </p>
-          )}
-        </form>
-      )}
-    </section>
-  );
-};
-
-const UsersSection: React.FC = () => {
-  useRefreshOnChange();
-  const toast = useToast();
-  const confirm = useConfirm();
-  const me = store.data.current_user;
-  const isTopSecret = store.getCurrentUserClearance() === 'TOP_SECRET';
-  const users = store.listUsers();
-
-  const handleClearance = (username: string, level: ClearanceLevel) => {
-    const result = store.setUserClearance(username, level);
-    toast.show(result.success ? `${username} is now ${level}.` : result.msg, result.success ? 'success' : 'error');
-  };
-
-  const handleDelete = async (username: string) => {
-    const ok = await confirm({
-      title: 'Delete account?',
-      message: `Delete the account "${username}"? They will no longer be able to sign in. Their cases and audit entries are kept.`,
-      confirmLabel: 'Delete account',
-      tone: 'danger',
-    });
-    if (!ok) return;
-    const result = store.deleteUser(username);
-    toast.show(result.success ? `Deleted ${username}.` : result.msg, result.success ? 'success' : 'error');
-  };
-
-  return (
-    <section className="premium-panel settings-section" aria-labelledby="settings-users-title">
-      <h2 id="settings-users-title" className="premium-panel-title">
-        <Users size={14} aria-hidden="true" /> Users
-      </h2>
-      {!isTopSecret ? (
-        <p className="settings-muted">Only TOP_SECRET users can manage accounts and clearance levels.</p>
-      ) : (
-        <div className="settings-table-wrap">
-          <table className="premium-table" aria-label="User accounts">
-            <thead>
-              <tr>
-                <th scope="col">User</th>
-                <th scope="col">Clearance</th>
-                <th scope="col">Created</th>
-                <th scope="col">
-                  <span className="sr-only">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {users.map((u) => (
-                <tr key={u.username}>
-                  <td style={{ fontWeight: 600 }}>
-                    {u.username}
-                    {u.username === me && <span className="settings-muted"> (you)</span>}
-                  </td>
-                  <td>
-                    <select
-                      className="premium-input"
-                      aria-label={`Clearance for ${u.username}`}
-                      value={u.clearance}
-                      onChange={(e) => handleClearance(u.username, e.target.value as ClearanceLevel)}
-                    >
-                      {CLEARANCES.map((level) => (
-                        <option key={level} value={level}>
-                          {level}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td>{new Date(u.created_at).toLocaleDateString()}</td>
-                  <td>
-                    <button
-                      type="button"
-                      className="premium-button"
-                      aria-label={`Delete user ${u.username}`}
-                      disabled={u.username === me}
-                      onClick={() => void handleDelete(u.username)}
-                    >
-                      <Trash2 size={14} aria-hidden="true" /> Delete
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
         </div>
       )}
     </section>
@@ -445,8 +276,8 @@ const DangerSection: React.FC = () => {
         <ShieldAlert size={14} aria-hidden="true" /> Danger zone
       </h2>
       <p>
-        Erase all local data deletes every case, user account, audit entry and setting stored in this browser, then
-        reloads the app and signs you out. This cannot be undone. Export a workspace backup first.
+        Erase all local data deletes every case, audit entry and setting stored in this browser, then reloads the
+        app. This cannot be undone. Download a full backup first.
       </p>
       <div className="settings-field">
         <label htmlFor="settings-erase-phrase">
@@ -478,26 +309,20 @@ const PrivacySection: React.FC = () => (
     <dl className="settings-privacy">
       <dt>Cookies (this site only, kept up to one year)</dt>
       <dd>
-        The workspace: cases, entities, incidents, signals, the audit trail, user accounts with password hashes, the
-        theme, and each AI provider's enabled flag and model name. Cookies are sent with every request to this site,
+        The workspace: cases, entities, incidents, signals, the audit trail, the theme, and each AI provider's enabled flag and model name. Cookies are sent with every request to this site,
         so the workspace is compressed and capped at about 16 KB.
       </dd>
       <dt>sessionStorage (this tab only, cleared when it closes)</dt>
-      <dd>AI provider API keys, and a copy of workspace data that could not be read.</dd>
+      <dd>AI provider API keys, the time of the last backup download, and a copy of workspace data that could not be read.</dd>
     </dl>
-    <p className="settings-muted">
-      Password hashing in this app is demo-grade and is not real authentication. Keep backup files private.
-    </p>
+    <p className="settings-muted">Backup files are not encrypted. Keep them private.</p>
   </section>
 );
 
 export const SettingsTab: React.FC = () => (
   <div id="SettingsPanel" className="settings-tab">
-    <DefaultPasswordBanner />
+    <YourDataSection />
     <StorageSection />
-    <BackupSection />
-    <AccountSection />
-    <UsersSection />
     <DangerSection />
     <PrivacySection />
   </div>
