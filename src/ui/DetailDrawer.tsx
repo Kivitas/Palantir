@@ -262,6 +262,9 @@ function EnrichSection({ entity }: { entity: Entity }) {
           </pre>
         </details>
       )}
+      <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '8px 0 0' }}>
+        Sanctions data: <a href="https://www.opensanctions.org" target="_blank" rel="noopener noreferrer">OpenSanctions</a> (CC BY 4.0)
+      </p>
     </section>
   );
 }

@@ -1,81 +1,72 @@
-# Palantir (Aegis Nexus) — Review & Osiris Integration Plan
+# Status: what shipped vs remaining
 
-Scope of review: all of `src/` read at the store/App/Login/Map/Explorer/AI/Pipeline level, the rest scanned by grep. `tsc -b` passes cleanly; `oxlint` reports **4 errors + 10 warnings**. Not run in a browser yet, so UI items below are from code, not screenshots.
+This replaces the earlier review and integration plan. Each item below was checked against `src/`, `functions/`, `public/`, `tests/`, and `docs/` as they stand. Items not re-checked are marked as such.
 
-## 1. Bugs / glitches (highest first)
+Checks run for this status: `npx tsc -b` passes, `npx oxlint src` reports no errors or warnings, and `npx vitest run` passes 124 tests in 4 files.
 
-| # | Where | Problem | Fix |
-|---|-------|---------|-----|
-| 1 | `LoginScreen.tsx:65-81` + `store.ts:102,113` | Password is hashed in the form, then hashed **again** in `store.signup/login`. The seeded `admin/admin` user is stored with a single hash, so the documented default login almost certainly fails. | Pass the raw password to the store; hash in one place only. |
-| 2 | `PipelineTab.tsx:59` vs `store.ts:358` | `bulkAddEntities(typeId, items, clearance)` is called as `(caseId, items)`. The type lookup fails, nothing is inserted, yet the UI shows "Successfully ingested N entities". The chosen clearance is also ignored. | Fix call signature; return a count/error from the store and show that. |
-| 3 | `ExplorerTab.tsx:29,71,88`, `AnalyticsTab.tsx:29` | `useMemo` after an early `return` (rules-of-hooks). Switching case selection can throw "rendered more hooks than previous render". | Move hooks above the guard. |
-| 4 | `MapTab.tsx:190-212` | Incident title/description injected into HTML strings (popup + divIcon) unescaped. Stored XSS, including via Pipeline JSON ingest. | Escape, or build DOM nodes / `textContent`. |
-| 5 | `OntologyTab.tsx:41` vs `store.ts:343` | Confirm dialog says entities are *not* deleted; `deleteOntologyType` deletes every entity of that type. Silent data loss. | Fix the text or stop deleting; add undo. |
-| 6 | `store.ts:3` | IDs are 9-char `Math.random()` strings (collision-prone). | `crypto.randomUUID()`. |
-| 7 | `store.ts` `save()` | Whole workspace re-serialised on every click (`selectObject` saves); audit log unbounded; quota error only `console.error`. `App` re-renders everything via `forceUpdate`. | Debounce save, don't persist selection, cap/rotate logs, surface quota errors, use `useSyncExternalStore`. |
-| 8 | `Explorer` / `App` | `selectObject` → `onSelect` callbacks are empty `() => {}`; selection has no visible effect in several tabs. | Add a shared detail drawer. |
-| 9 | `MapTab.tsx:50-61` | Invalid dates give `NaN` timeline bounds; scrubber silently hides incidents. | Validate dates at entry. |
-| 10 | Dead code | `AnalyticsTab` and `OmniSearch` are never mounted. `store.askCopilot` is a stub. | Mount or delete. |
+## Shipped
 
-## 2. Security / data-handling (matters for a "classified" tool)
+### Earlier review items
 
-- Auth is client-only; "password hashing" is a 32-bit string hash. Anyone can edit localStorage. Don't call it security; either label it a demo or add a real backend (see §4).
-- **Anyone can self-assign TOP_SECRET at signup.** Clearance must come from an admin.
-- AI API keys stored in plain text in localStorage, and serialised into the same blob as case data.
-- Clearance filtering (`hasClearance`) is not applied consistently — verify every list/graph/map/search path.
-- Don't send clearance-marked case data to third-party LLMs without a gate (matters for Osiris OI, below).
+| Item (original review) | Status | Where |
+|---|---|---|
+| Password hashed twice at login and signup | Fixed. The form no longer hashes. `login` upgrades old double-hashed values. | `LoginScreen.tsx`, `store.ts` |
+| Pipeline ingest called with the wrong arguments | Fixed. The call matches `bulkAddEntities(caseId, typeId, items, clearance)`. The store returns `BulkAddResult`. | `PipelineTab.tsx`, `store.ts` |
+| Hooks after an early return (Explorer, Analytics) | Fixed. Hooks sit above the guards in both tabs. | `ExplorerTab.tsx`, `AnalyticsTab.tsx` |
+| Unescaped incident text in map popups and icons | Fixed. Values go through `escapeHtml`. | `MapTab.tsx`, `utils/html.ts` |
+| Deleting an ontology type deleted its objects | Fixed. The store removes only the type, and the dialog says objects keep their data. | `store.ts`, `OntologyTab.tsx` |
+| `Math.random` IDs | Fixed. `crypto.randomUUID`, with a `getRandomValues` fallback on plain http. | `store.ts` |
+| Whole-workspace save on every click, unbounded log, silent quota errors | Mostly fixed. Saves are debounced 300 ms, the log is capped at 150, quota errors show a banner, and `App` uses `useSyncExternalStore`. | `store.ts`, `App.tsx` |
+| No shared detail view | Done. `DetailDrawer` is mounted once in `App`. | `ui/DetailDrawer.tsx` |
+| Invalid dates gave NaN timeline bounds | Fixed. Non-finite times are ignored. | `MapTab.tsx` |
+| `AnalyticsTab` and `OmniSearch` never mounted | Fixed. Both are mounted. `store.askCopilot` is still a stub with no callers. | `App.tsx`, `store.ts` |
+| Anyone could sign up as TOP_SECRET | Fixed. Signup always creates UNCLASSIFIED. Only a TOP_SECRET user can change clearance. | `store.ts`, `SettingsTab.tsx` |
+| AI keys in localStorage | Fixed. Keys are in sessionStorage only. | `store.ts`, `ai/` |
+| Case data reaching AI providers without a gate | Fixed for the AI tab. The send gate builds the payload and requires an acknowledgement. | `ai/gate.ts` |
+| Lint errors, `any`, README wrong about pnpm and D3 | Fixed. No `any` remains in `src/`. README is corrected. | `src/`, `README.md` |
+| No tests, no git, `dist/` tracked, no code splitting | Partly fixed. Vitest runs 124 tests. The repo is a git repo and `dist/` is ignored. Tabs are lazy-loaded. A Playwright smoke test does not exist. | `tests/`, `.gitignore`, `App.tsx` |
 
-## 3. UI / UX
+### Osiris integration plan
 
-- Nav tabs are silently `disabled` with no explanation when no case is selected → show a tooltip/empty-state CTA ("Select or create a case").
-- Native `alert()`/`confirm()` everywhere → toast + modal with undo.
-- Explorer filters are clickable `div`s (no keyboard/ARIA); sidebar is icon-only at 11 tabs; no responsive/mobile layout (fixed 240px filter column).
-- Heavy inline styles + a 2,000-line `index.css`; inconsistent design tokens (`premium-*` vs `btn-*` classes).
-- AI tab is a canned mock report that presents itself as analysis → label "Demo", or wire a real provider. The API-key UI implies it works.
-- Naming is inconsistent: "Palantir" (UI, README) vs "Aegis Nexus" (index.html). Using the Palantir name/logo is also a trademark risk if you ship publicly.
-- Login: password-strength meter only on signup; no show-password; no lockout.
-- Map: external tile servers and Nominatim without a proper User-Agent/rate-limit; Google Fonts is a runtime dependency (offline/air-gapped use fails). No loading/error states for tiles.
-- Graph (613 lines, custom pan/zoom/drag): no minimap/search/export; effects with missing deps will cause stale layout.
-- Accessibility: contrast of cyan-on-dark, no focus rings audit, no `aria-live` for status messages.
+| Phase | Status | Notes |
+|---|---|---|
+| 1. Foundations | Mostly done | Dev proxy for `/osiris`, `docker-compose.yml` with a sidecar behind nginx. The image tag is required through `OSIRIS_IMAGE_TAG`, with no default. Osiris's LICENSE and SECURITY notes are not reviewed here. |
+| 2. Live Feeds layer | Done | Seven layers: earthquakes, flights, fires, weather, GDELT, news, satellites. Client has an 8 s timeout and a 60 s cache. Feed items are not stored in the case. |
+| 3. Promote to case | Partly done | Promotes to an **incident** only, with provenance in the description. No separate `source` field, no entity promotion, and no audit entry. |
+| 4. Signals from feeds | Done, different shape | Up to 5 rule-based watch rules per case: minimum severity, keyword, or distance to an incident. Auto-run every 5 minutes. Deduplicated by `source_id`. No AI. |
+| 5. Enrichment | Done, different shape | Sanctions, wallet, WHOIS, and IP lookups from the entity drawer and Explorer. Classified objects need confirmation. Not built as Ontology Action Types. |
+| 6. Osiris assistant in the AI tab | Not done | The AI tab calls providers directly with the user's key, through the send gate. Osiris OI and the MCP endpoint are not wired in. |
+| 7. Global Ops tab | Done | Sandboxed frame for an https address the user enters. |
+| 8. Real backend | Not done | No server. See Remaining. |
 
-## 4. Engineering hygiene
+### Added since the original plan
 
-- README is wrong: says pnpm (repo has `package-lock.json`), says D3 (not installed), says "password hashing" security.
-- Fix the 4 lint errors / 10 exhaustive-deps warnings; replace `any` (Pipeline, Explorer, Ontology, Graph).
-- No tests. Add Vitest for the store (auth, bulk ingest, path-finding, clearance) and a Playwright smoke test.
-- `dist/` is present; add to `.gitignore`/ignore. Project isn't a git repo — `git init` first.
-- Add schema versioning + migration for the localStorage blob; JSON export/import of a case.
-- Code-split tabs (`React.lazy`) — Leaflet and graph code load up front.
+- **Browser tab**: reader view of third-party pages through `/browse`, with tabs, bookmarks, and save to case. See `docs/CLOUDFLARE.md` and `docs/ARCHITECTURE.md`.
+- **Settings tab**: storage meter, workspace and case backup and restore, password change, user clearance and deletion (TOP_SECRET only), and erase all local data.
 
-## 5. Osiris integration plan
+## Remaining
 
-**What Osiris is** (per its README; not independently verified): MIT-licensed Next.js 16 / React 19 / MapLibre GL OSINT dashboard with ~16 live layers (OpenSky flights, USGS quakes, NASA FIRMS/EONET, NOAA space weather, CCTV, GDELT, RSS news, Telegram public-channel scraping, sanctions, crypto-wallet tracing), a BYO-key LLM assistant ("OI"), an MCP endpoint (`/api/mcp`), a Docker image, and a RECON toolkit (port/vuln scan) that needs a separate scanner backend.
+These are the open items from the earlier review and this pass.
 
-**Key mismatch:** Osiris is server-side (Next API routes proxy third-party feeds; CORS and keys are handled there). Palantir is a browser-only Vite SPA. Porting Osiris wholesale into the SPA is not feasible; run it as a sidecar service and integrate at the data level.
+1. **Osiris response shapes are unverified against a live instance.** The normalizers accept several plausible shapes and drop anything else silently. OSINT query parameter names and the bounding-box format are unverified too.
+2. **Browser proxy, DNS gap.** The address check reads the URL text only. A public name that resolves to a private address, or rebinds at fetch time, is not blocked by the code. This needs a test from the deployed site. A Cloudflare WAF rate-limit rule for `/browse*` is needed and is not in the repo. Terms of service for proxied sources have not been checked.
+3. **Default admin password.** The first run creates `admin` / `admin` as TOP_SECRET. Settings warns while it is unchanged. Nothing forces a change.
+4. **Authentication is client-side and demo-grade.** Passwords use a 32-bit unsalted hash (`mockHash`). There is no server, session expiry, lockout, or rate limiting.
+5. **16 KB cookie cap.** The whole site shares 16,000 bytes of cookies. Bookmarks now count against it too.
+6. **Non-Anthropic model names are unverified.** The default model names for OpenAI, Gemini, and Mistral in `src/ai/providers.ts` must be checked against each provider's current list.
+7. **EONET fallback timeout.** The keyless weather fallback has a 10 s upstream timeout and a 16 MB cap. The EONET payload is large, so the weather layer can return 504.
 
-### Architecture
-```
-Palantir SPA (Vite, Leaflet)  ──/osiris/api/*──►  Osiris container (Next.js, :3000)
-        │  (dev: Vite proxy; prod: nginx reverse proxy, same origin)        │
-        └── optional: small Palantir API (auth, sync) ◄───── MCP /api/mcp ──┘
-```
+Also open, found in code:
 
-### Phases
-1. **Foundations (do first).** Fix §1 bugs 1–3; `git init`; add `docker-compose.yml` running `ghcr.io/simplifaisoul/osiris:latest` + Palantir behind nginx; Vite `server.proxy` for `/osiris`. Read Osiris `LICENSE`, `SECURITY.md`, `DOCKER.md`, `.env.example` and pin an image tag/commit (it has 358 commits and an active fork ecosystem — don't track `latest`).
-2. **Live Feeds layer in the Map tab.** `osirisClient.ts` calling `/api/earthquakes`, `/api/flights`, `/api/fires`, `/api/weather`, `/api/gdelt`, `/api/news`, `/api/satellites`; render as toggleable Leaflet layer groups with viewport-based fetching and per-layer counts. Feed items are **ephemeral** and separate from case data.
-3. **"Promote to case."** Click a feed item → create an Incident (lat/lon/time/source URL pre-filled) or Entity (aircraft, vessel, wallet), tagged `source: osiris`, with provenance in properties and an audit-log entry. Reuses existing `addIncident/addEntity`.
-4. **Signals from feeds.** Poll chosen layers (e.g., quakes M≥5 inside a case's bounding box, conflict-zone news matching entity names) and create `Signal` records with NEW status in the existing Signals tab; dedupe by source id.
-5. **Enrichment actions.** Add Ontology Action Types ("Sanctions check", "Wallet trace", "WHOIS/DNS/IP") that call `/api/osint/*` and write results onto the entity and audit log. Cross-check entity names against Osiris' OpenSanctions route.
-6. **Osiris assistant → AI tab.** Replace the mock AI report with Osiris OI (SSE `/api/oi`) or your own provider; MCP `/api/mcp` is the route if you want agents to read cases. **Gate:** never send cases above UNCLASSIFIED (or any user-defined threshold) to external LLMs; show exactly what will be sent.
-7. **Full-screen "Global Ops" tab (optional).** Embed the Osiris UI in an iframe for features not worth porting (CCTV/HLS, 3D, Telegram). Same-origin via nginx; note X-Frame-Options/CSP in Osiris' `next.config.ts`.
-8. **Real backend (needed for "full" integration).** Server-side auth/RBAC with admin-assigned clearance, server-side audit log and secret storage; otherwise integration data and API keys inherit the localStorage weaknesses.
+- **OpenSanctions attribution** is shown in the entity drawer's Enrich section only. The Explorer sanctions button shows results without it.
+- **Native `alert()`** is still used twice in `MapTab.tsx` for geocoding errors.
+- **Clearance filtering** is applied in the AI gate, export, and several views, not uniformly. Not re-audited in this pass.
+- **Source entities** from the Browser tab use the type string `Source`, which is not an ontology type.
+- **Osiris promotion** writes no audit entry and no `source` field (see Phase 3).
+- **Google Fonts** is still loaded at runtime from `index.html`, so offline use fails for the font.
+- **Naming.** `package.json` is still `palantir`, the cookie prefix is `aegis_ws`, and the folder is `Palantir`. The UI says Aegis Nexus.
+- **Tests** do not cover `functions/`, `src/browser/`, the Settings tab, or the Browser tab.
+- **Accessibility and responsive layout** were not re-checked in this pass.
+- **Dependency audit** (4 high-severity findings in dev tooling, per README) was not re-run in this pass.
 
-### Risks / decisions needed
-- **RECON toolkit (port scan, vuln scan):** needs a separate scanner backend not in the repo; only use against systems you're authorised to test. Recommend leaving it **out** of the first release.
-- **Telegram scraping and camera feeds:** check each source's terms and local law; some data (conflict-zone severity, ports) is hand-curated by Osiris, so show source and "as of" dates.
-- **Reliability:** public feeds rate-limit and break; add caching, timeouts, a per-layer error state, and an upstream-health indicator. Self-hosting means you own upgrades.
-- **Licensing/attribution:** MIT (per README) — include its notice if you copy code; OpenSanctions is CC-BY 4.0 and needs attribution.
-- **Naming:** Osiris markets itself as "A Palantir Alternative"; avoid implying affiliation either way.
-
-### Effort (rough)
-Phase 1 ≈ 1–2 days · 2–3 ≈ 3–4 days · 4–5 ≈ 3–4 days · 6 ≈ 2 days · 7 ≈ 1 day · 8 ≈ 1–2 weeks.
+Intentionally out of scope: RECON port and vulnerability scanning (not in the repo, per `.env.example`), and Telegram scraping and camera feeds (no code for either exists in `src/` or `functions/`).

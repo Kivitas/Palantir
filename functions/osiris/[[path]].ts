@@ -59,7 +59,14 @@ const PROXY_ROUTES: ReadonlySet<string> = new Set([
 const FALLBACK_ROUTES: ReadonlySet<string> = new Set(['earthquakes', 'weather'])
 
 const QUERY_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,31}$/
-const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/
+/** True if the value contains a C0 control character or DEL (same set as /[\u0000-\u001f\u007f]/). */
+function hasControlChars(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i)
+    if (code <= 0x1f || code === 0x7f) return true
+  }
+  return false
+}
 
 class HttpError extends Error {
   constructor(
@@ -162,7 +169,7 @@ function sanitizeQuery(params: URLSearchParams): URLSearchParams {
   for (const [key, value] of params) {
     if (count >= MAX_QUERY_PARAMS) break
     if (!QUERY_KEY_RE.test(key)) continue
-    if (value.length > MAX_QUERY_VALUE_LENGTH || CONTROL_CHARS_RE.test(value)) continue
+    if (value.length > MAX_QUERY_VALUE_LENGTH || hasControlChars(value)) continue
     out.append(key, value)
     count += 1
   }

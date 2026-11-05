@@ -12,7 +12,7 @@ import {
   browserReducer, canGoBack, canGoForward, currentUrl, MAX_TABS, newTab, START_URL, tabLabel,
   type BrowserState, type NavHow,
 } from '../browser/tabState';
-import { loadBookmarks, makeBookmark, MAX_BOOKMARKS, saveBookmarks, type Bookmark } from '../browser/bookmarks';
+import { initBookmarks, loadBookmarks, makeBookmark, MAX_BOOKMARKS, saveBookmarks, type Bookmark } from '../browser/bookmarks';
 import '../browser/browser.css';
 
 /** Repeated navigations to the same tab within this window are ignored (client-side debounce). */
@@ -59,6 +59,17 @@ export function BrowserTab() {
   const [bookmarks, setBookmarks] = useState<Bookmark[]>(loadBookmarks);
   const [addressError, setAddressError] = useState('');
   const [bookmarkNote, setBookmarkNote] = useState('');
+
+  // Bookmarks read as [] until the cookie store is initialised; reload once it is.
+  useEffect(() => {
+    let alive = true;
+    void initBookmarks().then(() => {
+      if (alive) setBookmarks(loadBookmarks());
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const controllers = useRef(new Map<string, AbortController>());
   const loadSeq = useRef(0);

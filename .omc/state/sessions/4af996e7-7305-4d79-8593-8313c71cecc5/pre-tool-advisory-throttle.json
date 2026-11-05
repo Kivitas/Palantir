@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "entries": {
+    "79a93d4a2f8f50b95f852280616242fee1855dc99a3c75211917f55e72e95fae": {
+      "last_emitted_at_ms": 1793872889945,
+      "message": "Use parallel execution for independent tasks. Use run_in_background for long operations (npm install, builds, tests)."
+    },
+    "445ed27a3872b681d98190bae61ccb84954e1bc4e140df5370be958dee776b3a": {
+      "last_emitted_at_ms": 1793872850306,
+      "message": "Verify changes work after editing. Test functionality before marking complete."
+    },
+    "466399dafa2d20f60587180bad0a07358eb7f2bce724df0ff682f038ad33f5ad": {
+      "last_emitted_at_ms": 1793872447823,
+      "message": "Read multiple files in parallel when possible for faster analysis."
+    },
+    "d6c082145e05f17c8714fc6035f5ea688b20b9fb19e6d5dbac60bff1554dea82": {
+      "last_emitted_at_ms": 1793872423405,
+      "message": "Spawning agent: general-purpose (haiku) | Task: Dependency audit review"
+    },
+    "7ae64ef8ceb870c223a5a0e293dfce531cbfca39b4640f994fc913145039d695": {
+      "last_emitted_at_ms": 1793872421305,
+      "message": "Spawning agent: general-purpose (haiku) | Task: License, attribution, plan cleanup"
+    },
+    "90b471c6b0288379e1377d6304189d785e90efcb5b02c87572d3d57c28cc00b9": {
+      "last_emitted_at_ms": 1793872415981,
+      "message": "Spawning agent: general-purpose (haiku) | Task: Bookmarks to cookies, lint"
+    }
+  },
+  "updated_at": "2026-11-05T10:01:29.945Z"
+}

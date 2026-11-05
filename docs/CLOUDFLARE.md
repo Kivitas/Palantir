@@ -1,6 +1,6 @@
 # Deploying Aegis Nexus to Cloudflare Pages
 
-Aegis Nexus is deployed as a **static Vite build** (`dist/`) plus a **Pages Function** that serves the same-origin `/osiris/api/*` routes. There is no server-side storage. User data lives in the browser: the workspace in cookies, and AI keys and the Global Ops address in sessionStorage.
+Aegis Nexus is deployed as a **static Vite build** (`dist/`) plus two **Pages Functions**: a same-origin gateway for `/osiris/api/*`, and a sanitising proxy for the Browser tab at `/browse`. There is no server-side storage. User data lives in the browser: the workspace in cookies, and AI keys and the Global Ops address in sessionStorage.
 
 Localhost and Docker are for development and optional self-hosting only. They are not part of the Cloudflare deployment.
 
@@ -11,8 +11,9 @@ Localhost and Docker are for development and optional self-hosting only. They ar
 | Static app | `npm run build` -> `dist/` | `index.html`, hashed assets, and `public/` copied as-is |
 | Security headers | `public/_headers` | CSP, nosniff, frame denial, referrer policy, permissions policy, HSTS |
 | SPA fallback | `public/_redirects` | `/* /index.html 200` |
-| Function routing | `public/_routes.json` | `include: ["/osiris/*"]`. Only these paths run the function. |
+| Function routing | `public/_routes.json` | `include: ["/osiris/*", "/browse*"]`. Only these paths run a function. |
 | Osiris gateway | `functions/osiris/[[path]].ts` | Allowlisted routes; proxy or keyless fallback |
+| Browser proxy | `functions/browse/[[path]].ts` | Fetches third-party pages for the Browser tab. See [Browser proxy](#browser-proxy-browse) |
 | Project config | `wrangler.toml` | Name `aegis-nexus`, output `dist`, compatibility date `2026-01-01` |
 
 ## Option A: connect the Git repository (recommended)
@@ -73,6 +74,48 @@ Behavior of the function:
 - Errors return JSON such as `{"error":"not_configured","message":"...","status":501}`, without upstream bodies or stack traces.
 - A misconfigured `OSIRIS_URL` returns 500 `misconfigured`. The function never falls back silently in that case.
 
+## Browser proxy (`/browse`)
+
+`functions/browse/[[path]].ts` serves the Browser tab. The tab shows the page as a reader view, so the proxy's job is to fetch a page and return sanitised HTML. Nothing from the target is run on the app's origin. The address checks live in `src/browser/ssrfGuard.ts`, which the function imports.
+
+Routes:
+
+| Request | Response |
+|---|---|
+| `GET /browse?url=<http(s) URL>` | `text/html`: JSON `{ finalUrl, title, html, status }` with sanitised HTML. Any other type: metadata only, `{ type, size, url, status }`, and the body is not read. |
+| `GET /browse?asset=1&url=<URL>` | PNG, JPEG, GIF, WebP, or AVIF image bytes. Anything else gets 415. |
+| Other methods | 405 |
+
+Address checks, applied to the first URL and to every redirect hop:
+
+- Only `http:` and `https:`. No user:password in the address. Ports 80 and 443 only. At most 2,048 characters. No whitespace, control characters, or backslashes.
+- IPv6 literals are refused. So are single-label hosts, numeric or hex last labels (non-canonical IP forms), `localhost`, `metadata`, `metadata.google.internal`, and names ending in `.localhost`, `.local`, `.internal`, `.localdomain`, `.lan`, `.home.arpa`, `.intranet`, `.corp`, or `.private`.
+- IPv4 addresses in 0/8, 10/8, 127/8, 100.64/10, 169.254/16, 172.16/12, 192.0.0/24, 192.0.2/24, 192.168/16, 198.18/15, 198.51.100/24, 203.0.113/24, and everything from 224.0.0.0 up are refused. Decimal, hex, and octal IPv4 forms are normalised first, so they are checked as their dotted form.
+
+Fetching:
+
+- Redirects are followed by hand, at most 5 hops, and each `Location` is checked again.
+- 10 second total timeout. HTML is capped at 2 MB and images at 3 MB. The `Content-Length` header and the streamed body are both checked.
+- The only headers sent upstream are a fixed `User-Agent: AegisNexusBrowser/1.0` and `Accept`. No cookies, no `Authorization`, no referrer.
+- Rate limit: 30 page requests and 240 image requests per minute, per `CF-Connecting-IP`. The counter lives in memory in each isolate, so it is best-effort. A limited request gets 429 with `Retry-After: 60`.
+
+Sanitising (HTMLRewriter):
+
+- Removed with their content: `script`, `style`, `iframe`, `object`, `embed`, `form`, `input`, `button`, `select`, `textarea`, `svg`, `math`, `video`, `audio`, `canvas`, `noscript`, `template`, `link`, `meta`, `base`, and a few others.
+- Only `title`, `alt`, `lang`, `dir`, `colspan`, `rowspan`, and `datetime` attributes survive. Links are rewritten to `data-aegis-href`. Up to 60 images per page are rewritten to the `asset=1` route, and the rest are removed.
+- Responses carry their own CSP (`default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox`), `no-store`, `nosniff`, and `Cross-Origin-Resource-Policy: same-origin`.
+- The browser then rebuilds the page as React elements from an allowlist (`src/browser/readerTree.ts`, `ReaderView.tsx`). No HTML markup is inserted, and no script runs.
+
+Errors are JSON `{ error, message, status }` with fixed messages. Upstream bodies and stack traces are never returned. Codes: `missing_url` and `blocked_url` (400, with a `reason` such as `private_ipv4` or `userinfo`), `blocked_redirect` (400), `not_an_image` (415), `rate_limited` (429), `bad_redirect`, `upstream_error`, `upstream_unavailable`, and `too_large` (502), `upstream_timeout` (504), `too_many_redirects` (508).
+
+The browser sends the request with `credentials: 'omit'` and `referrerPolicy: 'no-referrer'`. The site can see the proxy's address, not the user's.
+
+Open gaps. These are not closed in this repository:
+
+- **DNS.** The address check reads the URL text only. A public-looking name that resolves to a private or internal address is not refused by the code. The same applies to DNS rebinding, where a name resolves publicly at check time and privately at fetch time. Only the Workers runtime's egress would stop that, and this repo does not test it. Before offering the proxy beyond a trusted audience, test from the deployed site with a name that resolves to a private address.
+- **Rate limiting.** The per-isolate counter is not a real limit. Add a Cloudflare WAF rate-limiting rule for the path `/browse*` in the Cloudflare dashboard. That rule is not in the repository.
+- **Terms of service.** Proxying third-party pages may breach a site's terms, and automated fetching may be restricted. Check the terms of each source before offering it. This has not been reviewed.
+
 ## Local preview
 
 ```bash
@@ -111,7 +154,8 @@ The CSP in `public/_headers` is:
 
 Notes on the CSP:
 
-- `frame-src https:` is broader than the Global Ops tab needs. It lets the app embed any https page. Narrow it if Global Ops is not needed.
+- `frame-src https:` is broader than the Global Ops tab needs. It lets the app embed any https page. Narrow it if Global Ops is not needed. The Browser tab does not use a frame.
+- The Browser tab needs no CSP change. Its requests and images are same-origin (`connect-src 'self'`, `img-src 'self'`). The proxied HTML is rendered as React elements, not as a frame.
 - `connect-src` lists the AI providers because the browser calls them directly. Removing a provider here makes that provider's requests fail.
 - If you add a tile or API host, add it to the matching directive.
 
@@ -119,8 +163,9 @@ Notes on the CSP:
 
 - No server-side database, object store, or session store is used.
 - The workspace (cases, entities, users and password hashes, settings, and the audit log) is stored in **cookies** named `aegis_ws_*`. The site has a 16,000-byte Cookie header budget, including all of its cookies.
-- AI API keys are in **sessionStorage** and are cleared when the tab closes.
-- Cookies are sent with every request to the site, including static files and `/osiris/api/*` calls. The function does not forward them upstream.
+- AI API keys are in **sessionStorage** and are cleared when the tab closes. The Browser tab's first-use consent (`aegis_browser_consent`) is there too.
+- Browser tab bookmarks (up to 20, URLs and titles only) are in **cookies** (`aegis_bm`), inside the same 16,000-byte budget. An older `aegis_browser_bookmarks` copy in localStorage is moved once.
+- Cookies are sent with every request to the site, including static files, `/osiris/api/*` calls, and `/browse` calls. Neither function forwards them upstream.
 - Cookies are set `SameSite=Strict`, with `Secure` on https, and last one year. They are not `HttpOnly`, so any script running on the site can read them.
 - Data is per browser. Clearing cookies deletes the workspace. Nothing is backed up server-side.
 - Authentication is client-side only and is not a security boundary. See the README's Known limitations before using the deployment for anything sensitive.
@@ -133,5 +178,7 @@ Notes on the CSP:
 - **`/osiris/...` returns 500 `misconfigured`:** `OSIRIS_URL` is set but is not a valid http(s) base URL, has a query, fragment, or credentials, or points at this Pages site.
 - **`/osiris/...` returns 501 `not_configured`:** the route needs a self-hosted Osiris. Set `OSIRIS_URL`.
 - **Map tiles or search blocked in the browser console:** a CSP violation. Add the host to `public/_headers`.
-- **Storage banner: "Cookie storage is full":** the workspace exceeds the budget. There is no in-app backup button yet, and the app cannot delete audit entries (they are trimmed automatically). Delete old cases in the app to make room.
+- **Storage banner: "Cookie storage is full":** the workspace exceeds the budget. Export a backup from Settings > Backup and restore, then delete old cases or audit entries. Audit entries are also trimmed automatically.
 - **Global Ops frame is blank:** the site refuses to be framed. Use the "Open in new tab" link.
+- **`/browse` returns 404 HTML:** `_routes.json` must include `/browse*`, and the file must be in `dist/`. Without it, the SPA fallback in `_redirects` answers.
+- **Browser tab says "could not be reached" or 429:** the site did not answer within 10 seconds, or the per-isolate rate limit was hit. Wait a minute and try again.

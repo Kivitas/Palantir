@@ -4,7 +4,7 @@ This document describes the current structure of Aegis Nexus: the storage layer,
 
 ## Overview
 
-Aegis Nexus is a client-only single-page app. There is no backend. One store object holds the workspace, and it is saved to browser cookies. Two smaller values live in sessionStorage.
+Aegis Nexus is a client-side single-page app with no data server. One store object holds the workspace, and it is saved to browser cookies. Smaller values live in sessionStorage and localStorage. Two optional Cloudflare Pages Functions run beside the app and store nothing: the Osiris gateway (`functions/osiris/`) and the Browser proxy (`functions/browse/`).
 
 ```text
 index.html -> src/main.tsx -> src/App.tsx
@@ -13,16 +13,20 @@ index.html -> src/main.tsx -> src/App.tsx
                                 `-- tab components (lazy-loaded), each reading the store
                                         |
                                     src/store.ts (singleton)
-                                        |                    \
-                              src/utils/cookieStorage.ts      sessionStorage
-                                        |                     - aegis_ai_keys (AI API keys)
-                              cookies aegis_ws_0..n, aegis_ws_n  - aegis_osiris_ui (Global Ops URL)
+                                        |                    \                 \
+                              src/utils/cookieStorage.ts      sessionStorage    localStorage
+                                        |                     - aegis_ai_keys   (legacy copies, moved once)
+                              cookies aegis_ws_0..n, aegis_ws_n  - aegis_osiris_ui
+                              cookies aegis_bm (bookmarks)   - aegis_browser_consent
                                                               - aegis_ws_corrupt (unreadable copy)
+
+Same origin, no storage:  /osiris/api/*  -> functions/osiris/[[path]].ts
+                          /browse        -> functions/browse/[[path]].ts  (fetches third-party pages)
 ```
 
 ## Persistence layer (`src/utils/cookieStorage.ts`)
 
-Cookies are the only persistent store for the workspace. `localStorage` is touched only once, to migrate an older `palantir_workspace` value into cookies.
+Cookies are the only persistent store for the workspace. Browser tab bookmarks also live in cookies, under `aegis_bm`, and count against the same budget. `localStorage` is read only for one-time migrations: an older `palantir_workspace` value, and an older `aegis_browser_bookmarks` list.
 
 **Layout for a key `K`:**
 
@@ -41,7 +45,7 @@ Cookies are the only persistent store for the workspace. `localStorage` is touch
 
 **Timing.** Writes are debounced by 300 ms in the store and serialized through a queue. They are flushed on `pagehide`, when the page becomes hidden, and on `beforeunload`.
 
-**Backup helpers.** `exportAll` and `importAll` in the same module produce and read a generic `palantir-cookie-backup` JSON file. The app does not call them; the store's own export and import (below) are what is used.
+**Backup helpers.** `exportAll` and `importAll` in the same module produce and read a generic `palantir-cookie-backup` JSON file. The store calls `exportAll` only to list stored keys before Erase all local data. Nothing calls `importAll`. Workspace backups use the store's own export and import (below).
 
 ## Store (`src/store.ts`)
 
@@ -76,7 +80,7 @@ Not persisted: `selected_object` (UI selection) and AI API keys.
 | Watch rule keyword | 60 characters |
 | Watch rule radius | up to 20,000 km |
 
-**Auth.** `signup` creates UNCLASSIFIED accounts. Passwords must be at least 8 characters and are stored as `mockHash` output. `login` also accepts an older double-hashed value and upgrades it. `setUserClearance` requires a TOP_SECRET actor and refuses to demote the last TOP_SECRET user. No UI calls it yet.
+**Auth.** `signup` creates UNCLASSIFIED accounts. Passwords must be at least 8 characters and are stored as `mockHash` output. `login` also accepts an older double-hashed value and upgrades it. `changePassword` checks the current password first. `setUserClearance` requires a TOP_SECRET actor and refuses to demote the last TOP_SECRET user. `isDefaultAdminPassword` drives the Settings warning. Settings > Users calls `setUserClearance` and `deleteUser`; delete is disabled for the signed-in user.
 
 **Backups.**
 
@@ -84,7 +88,9 @@ Not persisted: `selected_object` (UI selection) and AI API keys.
 - `importWorkspace(json)` replaces the workspace. It keeps the current signed-in user if that user exists in the file, merges audit logs (deduplicated, capped at 150), keeps AI keys held in this session, and records a `WORKSPACE_IMPORT` entry.
 - `exportCase(id)` writes one case, filtered to what the current viewer's clearance allows. `importCase(json)` adds it with a fresh ID.
 
-These are tested in `tests/store.test.ts`. No component calls them yet.
+Settings > Backup and restore calls these. They are tested in `tests/store.test.ts`.
+
+**Erase.** `eraseAllLocalData()` removes the workspace key, the legacy key, and every other key found by `exportAll`, then Settings reloads the page. It is the only deletion path for all data.
 
 **AI keys.** `set_ai_key` and `clear_ai_keys` write to sessionStorage under `aegis_ai_keys`. Keys are never written to cookies, so they are not sent with requests and do not use the budget. An older `palantir_ai_keys` value in localStorage is moved once.
 
@@ -107,6 +113,8 @@ These are tested in `tests/store.test.ts`. No component calls them yet.
 | `audit` | Audit | `AuditTrailTab` | No | Filter, JSON download |
 | `dossier` | Dossier | `DossierTab` | Yes | Per-entity summary, print |
 | `globalops` | Global Ops | `GlobalOpsTab` | No | Sandboxed frame for a user-entered https URL |
+| `browser` | Browser | `BrowserTab` | No | Reader view of third-party pages through `/browse`; tabs, bookmarks, save to case |
+| `settings` | Settings | `SettingsTab` | No | Storage meter, backup and restore, password, users, erase all data |
 
 Tabs that need a case are shown as locked until one is selected. The Ctrl/Cmd+K search (`OmniSearch`) is available once signed in.
 
@@ -141,6 +149,36 @@ AuditLog            (timestamp, username, action, details)
 - **Enrichment** (`enrich.ts`). Four kinds: sanctions (entity name), wallet (a property with `wallet` or `address` in its key, 20 to 120 alphanumeric characters), WHOIS (a `domain` property), and IP (an `ip` property). Classified entities are refused unless the user confirms in a dialog (`enrichWithConfirm`). The audit entry for a classified entity holds the ID, not the name. The summary is saved only if the entity is still in the active case.
 - **Global Ops** (`GlobalOpsTab.tsx`). The https address is kept in sessionStorage. The frame uses `sandbox="allow-scripts allow-same-origin allow-popups"`.
 
+## Browser tab (`src/browser/`, `functions/browse/`)
+
+The Browser tab shows third-party pages as a reader view. The proxy and its limits are described in [CLOUDFLARE.md](CLOUDFLARE.md#browser-proxy-browse). On the client:
+
+- **`components/BrowserTab.tsx`** holds the UI: tab strip, toolbar, address bar, bookmarks, and the page view. It owns the AbortControllers and the 500 ms per-tab navigation debounce.
+- **`browser/client.ts`** calls `/browse` with `credentials: 'omit'` and checks the response shape strictly. `resolveAddress` uses an http(s) URL as typed, adds `https://` to host-like input, and turns anything else into a DuckDuckGo HTML search.
+- **`browser/tabState.ts`** is a pure reducer. Up to 8 tabs, and 50 history entries per tab. Responses for superseded navigations are ignored through `loadId`.
+- **`browser/readerTree.ts`** turns the sanitised HTML into a plain tree using an allowlist of tags. Links survive only as resolved http(s) URLs. Images survive only when they point at `/browse?asset=1`. Tree size is capped at 20,000 nodes and depth 120.
+- **`browser/ReaderView.tsx`** renders that tree as React elements. Links go through `onOpen`, which starts a proxied navigation. The browser never navigates to a page.
+- **`browser/bookmarks.ts`** keeps up to 20 bookmarks in the cookie store (`aegis_bm`). Titles are capped at 60 characters and URLs at 200, and duplicates are dropped. Each entry is re-validated on load. Reads return an empty list, and writes are refused, until the cookie store is ready, so existing bookmarks are never overwritten early. A write that would not fit the budget is refused.
+
+Behaviour:
+
+- **Consent.** The first navigation in a session asks the user to allow third-party pages. The answer is stored in sessionStorage as `aegis_browser_consent`. The start page never needs consent.
+- **Save to case.** Creates an entity with the type string `Source`, clearance UNCLASSIFIED, and properties `url`, `title`, `retrieved`, `excerpt` (the first 300 characters of visible text), and `classification`. `Source` is not one of the case's ontology types, so the entity shows the raw type name.
+- **Not supported.** Scripts, forms, logins, and video do not run or appear. Pages that refuse proxying show an error state.
+- **Tests.** No tests cover `src/browser/` or `functions/browse/` yet. `ssrfGuard.ts`, `readerTree.ts`, and `tabState.ts` are pure and could be unit-tested directly.
+
+## Settings tab (`SettingsTab.tsx`)
+
+Settings has these sections, in order:
+
+- **Default password warning.** Shown when the signed-in user is `admin` and the password is still the default.
+- **Storage.** Bytes used of the cookie budget, with a warning above 80%.
+- **Backup and restore.** Download the workspace, restore from a file (replaces everything after a confirm), export one case with the clearance filter, and import a case file as a new case.
+- **Account.** Change the signed-in user's password (current password required, minimum 8 characters).
+- **Users.** Visible to TOP_SECRET users only. Change any user's clearance, or delete a user other than yourself.
+- **Danger zone.** Erase all local data after typing `ERASE`.
+- **Privacy.** Says where each kind of data is stored.
+
 ## AI send gate (`src/ai/`)
 
 - **`gate.ts`** is the only path from case data to an external provider. `buildCasePayload` drops every item above the effective ceiling, which is the lower of the user's clearance and the maximum the user chose, before any text is built. The case description is left out because it has no clearance marking. The text is capped at 8,000 characters, with a footer reserve, and truncation is noted in the text.
@@ -155,10 +193,10 @@ Global styles and design tokens are in `src/index.css`. The dark theme is the de
 
 ## Tests
 
-`tests/` holds four Vitest suites in jsdom: `cookieStorage.test.ts`, `store.test.ts`, `osiris.client.test.ts`, and `html.test.ts`, with `tests/helpers/fakeBrowser.ts` as a fake cookie jar.
+`tests/` holds four Vitest suites in jsdom: `cookieStorage.test.ts`, `store.test.ts`, `osiris.client.test.ts`, and `html.test.ts`, with `tests/helpers/fakeBrowser.ts` as a fake cookie jar. They pass (124 tests at the time of writing). No suite covers the Pages Functions, the browser modules, or the Settings and Browser UI.
 
 ## Not built yet
 
-- A UI for backup, restore, and case export or import.
-- A password change, user deletion, and clearance management screen.
-- A server: server-side auth, server-side secrets, per-record persistence, and enforced clearance. Without it, the browser-storage limits above apply.
+- Server-side auth, server-side secrets, per-record persistence, and enforced clearance. Without a server, the browser-storage limits above apply.
+- A DNS-level check in the browser proxy, and a Cloudflare rate-limit rule for `/browse*`. Both are outside this code. See [CLOUDFLARE.md](CLOUDFLARE.md#browser-proxy-browse).
+- Osiris's own assistant and MCP endpoint are not wired into the AI tab. The AI tab calls providers directly with the user's key.

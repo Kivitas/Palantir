@@ -4,9 +4,11 @@ name: palantir
 
 services:
   osiris:
-    # TODO: pin a release tag or digest (e.g. ghcr.io/simplifaisoul/osiris:<tag>@sha256:...)
-    # after reviewing the release. `latest` is for evaluation only; the fork ecosystem is active.
-    image: ghcr.io/simplifaisoul/osiris:latest
+    # The image tag must be set explicitly (in .env or the shell) to a reviewed release tag or digest,
+    # e.g. OSIRIS_IMAGE_TAG=v1.2.3 or OSIRIS_IMAGE_TAG=v1.2.3@sha256:... . There is no default on purpose:
+    # `latest` changes under you on every pull, and the fork ecosystem moves fast, so an unpinned
+    # image would run code nobody reviewed. Compose refuses to start while the variable is unset or empty.
+    image: ghcr.io/simplifaisoul/osiris:${OSIRIS_IMAGE_TAG:?set a pinned tag or digest}
     env_file:
       - path: .env
         required: false
