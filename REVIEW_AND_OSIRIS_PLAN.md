@@ -55,8 +55,8 @@ These are the open items from the earlier review and this pass.
 4. **Clearance labels are not access control.** They gate AI sends and enrichment. The export and view filters use the operator's TOP_SECRET clearance, so they exclude nothing today. Nothing is enforced on a server.
 5. **16 KB cookie cap.** The whole site shares 16,000 bytes of cookies. Bookmarks count against it too.
 6. **Non-Anthropic model names are unverified.** The default model names for OpenAI, Gemini, and Mistral in `src/ai/providers.ts` must be checked against each provider's current list.
-7. **EONET fallback timeout.** The keyless weather fallback has a 10 s upstream timeout and a 16 MB cap. The EONET payload is large, so the weather layer can return 504.
-8. **Settings copy on exports.** The Settings text says exports and CSV downloads include only items the clearance allows. With the operator fixed at TOP_SECRET, that filter excludes nothing. The wording should say so, or the filter should be removed.
+7. **EONET fallback.** The weather fallback now requests only the last 30 days and at most 500 events to avoid upstream timeouts. Not re-verified against the live service.
+8. **Settings copy on exports.** Fixed: the Settings text says downloads include everything in the case.
 
 Also open, found in code:
 

@@ -974,12 +974,6 @@ class Store {
     return [];
   }
 
-  public askCopilot(_msg: string): { text: string, path?: string[] } {
-    return {
-      text: "I am a simulated AI copilot. I don't have a real backend to answer this request."
-    };
-  }
-
   // ---- Ontology -----------------------------------------------------------
 
   public addOntologyType(caseId: string, name: string, icon: string, color: string) {

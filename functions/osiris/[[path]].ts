@@ -30,7 +30,7 @@ interface Env {
 type JsonRecord = Record<string, unknown>
 
 const UPSTREAM_TIMEOUT_MS = 10_000
-const MAX_UPSTREAM_BYTES = 16 * 1024 * 1024 // NASA EONET open-events payload is ~5 MB today
+const MAX_UPSTREAM_BYTES = 16 * 1024 * 1024 // capped EONET query (30 days, 500 events) is well under this
 const MAX_QUERY_PARAMS = 10
 const MAX_QUERY_VALUE_LENGTH = 256
 const MAX_FALLBACK_FEATURES = 500
@@ -38,7 +38,7 @@ const CACHE_OK = 'public, s-maxage=60'
 const ALLOWED_METHODS = 'GET, HEAD, OPTIONS'
 
 const USGS_EARTHQUAKES_URL = 'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson'
-const NASA_EONET_EVENTS_URL = 'https://eonet.gsfc.nasa.gov/api/v3/events?status=open'
+const NASA_EONET_EVENTS_URL = 'https://eonet.gsfc.nasa.gov/api/v3/events?status=open&days=30&limit=500'
 
 /** Routes (path after /osiris/api/) this function will ever touch. Matches the client's feed and OSINT endpoints. */
 const PROXY_ROUTES: ReadonlySet<string> = new Set([
