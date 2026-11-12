@@ -189,4 +189,4 @@ Aegis Nexus uses the following. Each source keeps its own terms.
 
 ## License
 
-Aegis Nexus is released under the MIT License. See [LICENSE](LICENSE). Osiris is a separate MIT-licensed project by its own authors. Data sources used by the optional integration have their own terms; see [docs/OSIRIS.md](docs/OSIRIS.md).
+Copyright (C) 2026 Kivitas. Aegis Nexus is free software, released under the GNU Affero General Public License v3.0 (AGPL-3.0-only). See [LICENSE](LICENSE). If you run a modified version as a network service, section 13 requires you to offer its users the corresponding source code. Osiris is a separate MIT-licensed project by its own authors. Data sources used by the optional integration have their own terms; see [docs/OSIRIS.md](docs/OSIRIS.md).
